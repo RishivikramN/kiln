@@ -57,8 +57,9 @@ type TUI struct {
 	historyTmp string
 
 	// spinner state (atomic so goroutine can update without the mutex)
-	spinning   int32 // 1 while waiting for first token
-	spinnerIdx int32
+	spinning     int32 // 1 while waiting for first token
+	spinnerIdx   int32
+	spinnerStart time.Time // set under mu when spinning starts
 
 	width        int
 	height       int
@@ -335,6 +336,9 @@ func (t *TUI) runChat() {
 	idx := len(t.messages) - 1
 
 	// start spinner
+	t.mu.Lock()
+	t.spinnerStart = time.Now()
+	t.mu.Unlock()
 	atomic.StoreInt32(&t.spinning, 1)
 	atomic.StoreInt32(&t.spinnerIdx, 0)
 	spinnerDone := make(chan struct{})
@@ -369,8 +373,41 @@ func (t *TUI) runChat() {
 		tools = base
 	}
 
+	sysPrompt := systemPrompt
+
+	// build explicit tool list so the model never has to guess what it has
+	var toolNames []string
+	for _, tool := range tools {
+		toolNames = append(toolNames, tool.Name)
+	}
+	toolList := "none"
+	if len(toolNames) > 0 {
+		toolList = strings.Join(toolNames, ", ")
+	}
+
+	permState := "none — you have no tools. Tell the user to run /permissions rw or /permissions ro before doing anything."
+	if t.permStore != nil {
+		if p, ok := t.permStore.Get(t.repoPath); ok {
+			switch p.Mode {
+			case "read-write":
+				permState = "read-write"
+			case "read-only":
+				permState = "read-only"
+			}
+		}
+	}
+
+	sysPrompt += fmt.Sprintf(
+		"\n\nCURRENT SESSION:\nWorking directory: %s\nPermission level: %s\nTools you have RIGHT NOW (call these yourself, do not mention them to the user): %s",
+		t.repoPath, permState, toolList,
+	)
+
+	if t.systemPrompt != "" {
+		sysPrompt += "\n\nSession instructions: " + t.systemPrompt
+	}
+
 	firstToken := true
-	err := t.provider.Chat(context.Background(), t.systemPrompt, history, tools,
+	err := t.provider.Chat(context.Background(), sysPrompt, history, tools,
 		func(token string) {
 			if firstToken {
 				// stop spinner before first write
@@ -734,7 +771,8 @@ func (t *TUI) chatLines() []string {
 			content := msg.Content
 			if content == "" && i == len(t.messages)-1 && atomic.LoadInt32(&t.spinning) == 1 {
 				frame := spinnerFrames[int(atomic.LoadInt32(&t.spinnerIdx))%len(spinnerFrames)]
-				lines = append(lines, ansiDim+"  "+frame+" thinking…"+ansiReset)
+				elapsed := formatElapsed(time.Since(t.spinnerStart))
+				lines = append(lines, ansiDim+"  "+frame+" thinking… "+elapsed+ansiReset)
 				lines = append(lines, "")
 				continue
 			}
@@ -768,6 +806,14 @@ func (t *TUI) chatLines() []string {
 		}
 	}
 	return lines
+}
+
+func formatElapsed(d time.Duration) string {
+	s := int(d.Seconds())
+	if s < 60 {
+		return fmt.Sprintf("%ds", s)
+	}
+	return fmt.Sprintf("%dm %ds", s/60, s%60)
 }
 
 func toolSummary(name string) string {

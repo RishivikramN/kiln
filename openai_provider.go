@@ -244,14 +244,16 @@ func toOpenAITools(tools []Tool) []openai.ChatCompletionToolParam {
 }
 
 // extractTextToolCall detects when a model emits a tool call as plain JSON text,
-// optionally wrapped in a markdown code fence. Returns the parsed name + args.
+// either embedded in prose or wrapped in a markdown code fence.
+// Uses json.Decoder so trailing garbage (e.g. extra `}`) is tolerated.
 func extractTextToolCall(content string) (name, argsJSON string, ok bool) {
-	// strip markdown code fence: ```json ... ``` or ``` ... ```
 	s := content
+
+	// unwrap markdown code fence if present
 	if idx := strings.Index(s, "```"); idx != -1 {
 		s = s[idx+3:]
 		if nl := strings.IndexByte(s, '\n'); nl != -1 {
-			s = s[nl+1:] // skip optional language tag line
+			s = s[nl+1:] // skip optional language tag line (e.g. "json")
 		}
 		if end := strings.Index(s, "```"); end != -1 {
 			s = s[:end]
@@ -259,17 +261,29 @@ func extractTextToolCall(content string) (name, argsJSON string, ok bool) {
 		s = strings.TrimSpace(s)
 	}
 
-	var m map[string]any
-	if err := json.Unmarshal([]byte(s), &m); err != nil {
+	// find the start of a tool-call JSON object within prose
+	// models often emit: "Please run:\n{\"name\":\"list_files\",...}"
+	if start := strings.Index(s, `{"name"`); start != -1 {
+		s = s[start:]
+	} else if !strings.HasPrefix(strings.TrimSpace(s), "{") {
 		return "", "", false
 	}
-	n, ok := m["name"].(string)
-	if !ok {
+
+	// decode exactly one JSON object — Decoder ignores trailing bytes/garbage
+	var m map[string]any
+	if err := json.NewDecoder(strings.NewReader(s)).Decode(&m); err != nil {
+		return "", "", false
+	}
+	n, hasName := m["name"].(string)
+	if !hasName {
 		return "", "", false
 	}
 	args := m["arguments"]
 	if args == nil {
 		args = m["parameters"]
+	}
+	if args == nil {
+		args = map[string]any{}
 	}
 	b, err := json.Marshal(args)
 	if err != nil {
