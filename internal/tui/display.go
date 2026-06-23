@@ -107,10 +107,21 @@ func (t *TUI) renderLocked() {
 	sb.WriteString(moveTo(t.height-1, 1))
 	sb.WriteString(ansiDim + strings.Repeat("─", t.width) + ansiReset)
 
-	// Input line
+	// Input line — render block cursor at t.cursorPos
 	sb.WriteString(moveTo(t.height, 1))
 	sb.WriteString(ansiClearLine)
-	sb.WriteString(ansiGreen + ansiBold + "  ❯ " + ansiReset + string(t.input) + "█")
+	sb.WriteString(ansiGreen + ansiBold + "  ❯ " + ansiReset)
+	cp := t.cursorPos
+	if cp > len(t.input) {
+		cp = len(t.input)
+	}
+	sb.WriteString(string(t.input[:cp]))
+	if cp < len(t.input) {
+		sb.WriteString("\033[7m" + string(t.input[cp:cp+1]) + ansiReset)
+		sb.WriteString(string(t.input[cp+1:]))
+	} else {
+		sb.WriteString("█")
+	}
 
 	fmt.Print(sb.String())
 }
@@ -223,6 +234,8 @@ func toolSummary(name string) string {
 		return "Listed files"
 	case "read_file":
 		return "Read file"
+	case "grep":
+		return "Searched files"
 	case "write_file":
 		return "Wrote file"
 	case "run_command":

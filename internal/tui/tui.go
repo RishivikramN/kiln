@@ -30,6 +30,7 @@ type TUI struct {
 	history    []string
 	historyIdx int
 	historyTmp string
+	cursorPos  int // insertion point within t.input (rune index)
 
 	// spinner state (atomic so goroutine can update without the mutex)
 	spinning     int32 // 1 while waiting for first token

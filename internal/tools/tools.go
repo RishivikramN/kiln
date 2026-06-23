@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -19,7 +21,7 @@ import (
 // ReadTools returns only the read-only subset of built-in tools.
 func ReadTools() []provider.Tool {
 	all := DefaultTools()
-	return all[:2] // list_files, read_file
+	return all[:3] // list_files, read_file, grep
 }
 
 // DefaultTools returns the built-in file system and shell tools.
@@ -70,13 +72,21 @@ func DefaultTools() []provider.Tool {
 		},
 		{
 			Name:        "read_file",
-			Description: "Read the full contents of a file in the repository.",
+			Description: "Read a file in the repository. Reads the full file by default (capped at 40 KB). Use start_line and end_line (1-indexed, inclusive) to read a specific range of lines — no cap applies when a range is given.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"path": map[string]any{
 						"type":        "string",
 						"description": "Relative path to the file",
+					},
+					"start_line": map[string]any{
+						"type":        "integer",
+						"description": "First line to read, 1-indexed (optional)",
+					},
+					"end_line": map[string]any{
+						"type":        "integer",
+						"description": "Last line to read, inclusive (optional)",
 					},
 				},
 				"required": []string{"path"},
@@ -94,11 +104,140 @@ func DefaultTools() []provider.Tool {
 				if err != nil {
 					return "", err
 				}
+				startRaw, hasStart := input["start_line"]
+				endRaw, hasEnd := input["end_line"]
+				if hasStart || hasEnd {
+					lines := strings.Split(string(data), "\n")
+					total := len(lines)
+					start, end := 1, total
+					if hasStart {
+						if n, ok := jsonInt(startRaw); ok && n >= 1 {
+							start = n
+						}
+					}
+					if hasEnd {
+						if n, ok := jsonInt(endRaw); ok && n >= 1 {
+							end = n
+						}
+					}
+					if start > total {
+						return fmt.Sprintf("(start_line %d is beyond the end of the file — %d lines total)", start, total), nil
+					}
+					if end > total {
+						end = total
+					}
+					if end < start {
+						end = start
+					}
+					var sb strings.Builder
+					for i, line := range lines[start-1 : end] {
+						fmt.Fprintf(&sb, "%d: %s\n", start+i, line)
+					}
+					return sb.String(), nil
+				}
 				const maxBytes = 40000
 				if len(data) > maxBytes {
 					return string(data[:maxBytes]) + "\n\n... (file truncated at 40 KB)", nil
 				}
 				return string(data), nil
+			},
+		},
+		{
+			Name:        "grep",
+			Description: "Search for a pattern across files in the repository. Returns matches as file:line:content. Supports regular expressions. Searches recursively when given a directory.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"pattern": map[string]any{
+						"type":        "string",
+						"description": "Regular expression or literal string to search for",
+					},
+					"path": map[string]any{
+						"type":        "string",
+						"description": "File or directory to search (default: '.' for repo root)",
+					},
+					"case_insensitive": map[string]any{
+						"type":        "boolean",
+						"description": "Match case-insensitively (default: false)",
+					},
+				},
+				"required": []string{"pattern"},
+			},
+			Execute: func(repoPath string, perms *permissions.PermStore, input map[string]any) (string, error) {
+				if perms != nil && !perms.CanRead(repoPath) {
+					return "", fmt.Errorf("read permission denied — use /permissions allow")
+				}
+				pattern, _ := input["pattern"].(string)
+				if pattern == "" {
+					return "", fmt.Errorf("pattern is required")
+				}
+				rel, _ := input["path"].(string)
+				if rel == "" {
+					rel = "."
+				}
+				if ci, _ := input["case_insensitive"].(bool); ci {
+					pattern = "(?i)" + pattern
+				}
+				re, err := regexp.Compile(pattern)
+				if err != nil {
+					return "", fmt.Errorf("invalid pattern: %w", err)
+				}
+				target, err := SafeJoin(repoPath, rel)
+				if err != nil {
+					return "", err
+				}
+				const maxMatches = 100
+				var results []string
+				truncated := false
+				walkErr := filepath.WalkDir(target, func(path string, d fs.DirEntry, err error) error {
+					if err != nil {
+						return nil
+					}
+					if d.IsDir() {
+						switch d.Name() {
+						case ".git", "node_modules", "vendor", ".cache", "dist", "build":
+							return filepath.SkipDir
+						}
+						return nil
+					}
+					data, readErr := os.ReadFile(path)
+					if readErr != nil {
+						return nil
+					}
+					// skip binary files
+					check := data
+					if len(check) > 512 {
+						check = check[:512]
+					}
+					if bytes.IndexByte(check, 0) >= 0 {
+						return nil
+					}
+					relPath, _ := filepath.Rel(repoPath, path)
+					for i, line := range strings.Split(string(data), "\n") {
+						if len(results) >= maxMatches {
+							truncated = true
+							return filepath.SkipAll
+						}
+						if re.MatchString(line) {
+							if len(line) > 200 {
+								line = line[:200] + "…"
+							}
+							results = append(results, fmt.Sprintf("%s:%d:%s", relPath, i+1, line))
+						}
+					}
+					return nil
+				})
+				if walkErr != nil {
+					return "", walkErr
+				}
+				if len(results) == 0 {
+					return "(no matches)", nil
+				}
+				out := strings.Join(results, "\n")
+				if truncated {
+					out += fmt.Sprintf("\n… (capped at %d matches)", maxMatches)
+				}
+				return out, nil
 			},
 		},
 		{
@@ -182,6 +321,19 @@ func DefaultTools() []provider.Tool {
 			},
 		},
 	}
+}
+
+// jsonInt converts a JSON-decoded number (float64) or int to int.
+func jsonInt(v any) (int, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	}
+	return 0, false
 }
 
 // SafeJoin joins repoPath and rel, rejecting path traversal attempts.

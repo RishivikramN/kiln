@@ -220,6 +220,150 @@ func TestWriteFile_traversalRejected(t *testing.T) {
 	}
 }
 
+// ---- read_file line range ----
+
+func TestReadFile_lineRange(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "lines.txt"), []byte("one\ntwo\nthree\nfour\nfive\n"), 0644)
+
+	out, err := toolExec(t, "read_file", dir, map[string]any{"path": "lines.txt", "start_line": float64(2), "end_line": float64(4)})
+	if err != nil {
+		t.Fatalf("read_file line range error: %v", err)
+	}
+	if !strings.Contains(out, "two") || !strings.Contains(out, "four") {
+		t.Errorf("expected lines 2-4 in output: %q", out)
+	}
+	if strings.Contains(out, "one") || strings.Contains(out, "five") {
+		t.Errorf("output should not include lines outside range: %q", out)
+	}
+}
+
+func TestReadFile_lineRange_includesNumbers(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "f.txt"), []byte("a\nb\nc\n"), 0644)
+
+	out, _ := toolExec(t, "read_file", dir, map[string]any{"path": "f.txt", "start_line": float64(2), "end_line": float64(2)})
+	if !strings.Contains(out, "2:") {
+		t.Errorf("expected line number prefix in output: %q", out)
+	}
+}
+
+func TestReadFile_lineRange_startBeyondEOF(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "short.txt"), []byte("only one line\n"), 0644)
+
+	out, err := toolExec(t, "read_file", dir, map[string]any{"path": "short.txt", "start_line": float64(99)})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "beyond") {
+		t.Errorf("expected beyond-EOF message: %q", out)
+	}
+}
+
+// ---- grep ----
+
+func TestGrep_match(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "hello.go"), []byte("package main\n\nfunc Hello() {}\n"), 0644)
+
+	out, err := toolExec(t, "grep", dir, map[string]any{"pattern": "func Hello"})
+	if err != nil {
+		t.Fatalf("grep error: %v", err)
+	}
+	if !strings.Contains(out, "hello.go") || !strings.Contains(out, "func Hello") {
+		t.Errorf("expected match in output: %q", out)
+	}
+}
+
+func TestGrep_noMatch(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "f.go"), []byte("package main\n"), 0644)
+
+	out, err := toolExec(t, "grep", dir, map[string]any{"pattern": "xyz_not_here"})
+	if err != nil {
+		t.Fatalf("grep error: %v", err)
+	}
+	if out != "(no matches)" {
+		t.Errorf("want '(no matches)', got %q", out)
+	}
+}
+
+func TestGrep_caseInsensitive(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "f.txt"), []byte("Hello World\n"), 0644)
+
+	out, err := toolExec(t, "grep", dir, map[string]any{"pattern": "hello", "case_insensitive": true})
+	if err != nil {
+		t.Fatalf("grep error: %v", err)
+	}
+	if !strings.Contains(out, "Hello World") {
+		t.Errorf("expected case-insensitive match: %q", out)
+	}
+}
+
+func TestGrep_caseInsensitive_noMatchWhenFalse(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "f.txt"), []byte("Hello World\n"), 0644)
+
+	out, _ := toolExec(t, "grep", dir, map[string]any{"pattern": "hello"})
+	if out != "(no matches)" {
+		t.Errorf("expected no match for case-sensitive search: %q", out)
+	}
+}
+
+func TestGrep_specificFile(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.go"), []byte("needle\n"), 0644)
+	os.WriteFile(filepath.Join(dir, "b.go"), []byte("other\n"), 0644)
+
+	out, err := toolExec(t, "grep", dir, map[string]any{"pattern": "needle", "path": "a.go"})
+	if err != nil {
+		t.Fatalf("grep error: %v", err)
+	}
+	if strings.Contains(out, "b.go") {
+		t.Error("grep on specific file should not search other files")
+	}
+}
+
+func TestGrep_skipsGitDir(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".git"), 0755)
+	os.WriteFile(filepath.Join(dir, ".git", "match.txt"), []byte("needle\n"), 0644)
+	os.WriteFile(filepath.Join(dir, "code.go"), []byte("nothing\n"), 0644)
+
+	out, _ := toolExec(t, "grep", dir, map[string]any{"pattern": "needle"})
+	if strings.Contains(out, ".git") {
+		t.Error("grep should skip .git directory")
+	}
+}
+
+func TestGrep_skipsBinaryFiles(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "binary.bin"), []byte("text\x00binary\x00data"), 0644)
+
+	out, _ := toolExec(t, "grep", dir, map[string]any{"pattern": "text"})
+	if strings.Contains(out, "binary.bin") {
+		t.Error("grep should skip binary files")
+	}
+}
+
+func TestGrep_invalidPattern(t *testing.T) {
+	dir := t.TempDir()
+	_, err := toolExec(t, "grep", dir, map[string]any{"pattern": "["})
+	if err == nil {
+		t.Error("expected error for invalid regex pattern")
+	}
+}
+
+func TestGrep_traversalRejected(t *testing.T) {
+	dir := t.TempDir()
+	_, err := toolExec(t, "grep", dir, map[string]any{"pattern": "x", "path": "../../etc"})
+	if err == nil {
+		t.Error("expected error for path traversal in grep")
+	}
+}
+
 // ---- run_command ----
 
 func TestRunCommand_success(t *testing.T) {
