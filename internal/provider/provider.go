@@ -41,6 +41,9 @@ type Provider interface {
 	ActiveModel() string
 	SetModel(model string) error
 	Models() []string
+	// ContextWindow returns the maximum context length in tokens for the active
+	// model. Returns 0 if unknown.
+	ContextWindow() int
 	// Chat runs a conversation turn. tools may be nil. The provider owns the
 	// tool-calling loop: it keeps calling the model until no more tool calls
 	// are requested, executes each tool via onTool, and streams text via onToken.

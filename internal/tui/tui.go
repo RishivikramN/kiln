@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -47,6 +48,7 @@ type TUI struct {
 	quit         bool
 	responding   bool
 	chatCancel   func() // non-nil while a Chat() call is in flight
+	lastTitle    string // last title sent to the terminal; avoids redundant escapes
 
 	activeProvider  provider.Provider
 	providers       map[string]provider.Provider
@@ -170,6 +172,7 @@ func (t *TUI) Run() error {
 	defer t.disableRawMode()
 	defer fmt.Print(ansiShowCursor)
 	defer fmt.Print(ansiClearScreen)
+	defer fmt.Print("\033]0;\007") // restore blank tab title on exit
 
 	sigCh := make(chan os.Signal, 1)
 	// Use os/signal indirectly — import via syscall.SIGWINCH
@@ -234,6 +237,52 @@ func (t *TUI) Run() error {
 
 func (t *TUI) addSystem(msg string) {
 	t.messages = append(t.messages, provider.Message{Role: "system", Content: msg})
+}
+
+// estimatedTokens returns a rough token count for the current conversation.
+// Safe to call from renderLocked (t.mu already held) — must not re-acquire t.mu.
+func (t *TUI) estimatedTokens() int {
+	chars := len(systemPrompt) + 300 // base prompt + session-context injection
+	for _, m := range t.messages {
+		switch m.Role {
+		case "user", "assistant",
+			provider.RoleHistAst, provider.RoleHistUsr,
+			provider.RoleHistAstOAI, provider.RoleHistUsrOAI,
+			provider.RoleHistAstClaude, provider.RoleHistUsrClaude,
+			provider.RoleHistAstGemini, provider.RoleHistUsrGemini:
+			chars += len(m.Content) + 8
+		}
+	}
+	return chars / 4
+}
+
+// tabTitle returns the terminal tab title for the current conversation.
+// Called from renderLocked — must not acquire t.mu.
+func (t *TUI) tabTitle() string {
+	for _, m := range t.messages {
+		if m.Role == "user" {
+			text := strings.TrimSpace(m.Content)
+			if i := strings.IndexByte(text, '\n'); i >= 0 {
+				text = text[:i]
+			}
+			text = strings.TrimSpace(text)
+			if len(text) == 0 {
+				continue
+			}
+			if len(text) > 40 {
+				text = text[:38] + "…"
+			}
+			return "kiln — " + text
+		}
+	}
+	return "kiln — " + t.repo
+}
+
+func (t *TUI) contextWindow() int {
+	if t.activeProvider == nil {
+		return 0
+	}
+	return t.activeProvider.ContextWindow()
 }
 
 // render acquires the lock and renders the TUI.

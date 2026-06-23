@@ -43,6 +43,7 @@ func NewClaudeProvider() (*ClaudeProvider, error) {
 func (p *ClaudeProvider) Name() string        { return "claude" }
 func (p *ClaudeProvider) ActiveModel() string { return p.model }
 func (p *ClaudeProvider) Models() []string    { return claudeModels }
+func (p *ClaudeProvider) ContextWindow() int  { return 200000 }
 
 func (p *ClaudeProvider) SetModel(model string) error {
 	for _, m := range claudeModels {

@@ -22,6 +22,7 @@ func (t *TUI) handleCommand(cmd string) {
 			"  /permissions deny      — revoke access",
 			"  /system <prompt>       — set system prompt",
 			"  /system                — clear system prompt",
+			"  /compact               — summarise conversation to free context",
 			"  /undo                  — remove last exchange",
 			"  /copy                  — copy last response to clipboard",
 			"  /clear                 — clear chat history",
@@ -44,6 +45,9 @@ func (t *TUI) handleCommand(cmd string) {
 		t.handlePermissions(parts[1:])
 	case "/system":
 		t.handleSystem(parts[1:])
+	case "/compact":
+		t.handleCompact()
+		return // handleCompact launches a goroutine; don't reset scrollOffset yet
 	case "/undo":
 		t.handleUndo()
 	case "/copy":
@@ -176,6 +180,31 @@ func (t *TUI) handleUndo() {
 	} else {
 		t.addSystem("nothing to undo")
 	}
+}
+
+func (t *TUI) handleCompact() {
+	if t.activeProvider == nil {
+		t.addSystem("no provider connected")
+		return
+	}
+	t.mu.Lock()
+	if t.chatCancel != nil {
+		t.mu.Unlock()
+		t.addSystem("wait for current response to finish before compacting")
+		return
+	}
+	ctx, cancel := newChatContext()
+	t.chatCancel = cancel
+	t.mu.Unlock()
+
+	go func() {
+		t.runCompact(ctx)
+		cancel()
+		t.mu.Lock()
+		t.chatCancel = nil
+		t.mu.Unlock()
+		t.render()
+	}()
 }
 
 func (t *TUI) handleCopy() {

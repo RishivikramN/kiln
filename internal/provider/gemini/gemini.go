@@ -43,6 +43,7 @@ func NewGeminiProvider() (*GeminiProvider, error) {
 func (p *GeminiProvider) Name() string        { return "gemini" }
 func (p *GeminiProvider) ActiveModel() string { return p.model }
 func (p *GeminiProvider) Models() []string    { return geminiModels }
+func (p *GeminiProvider) ContextWindow() int  { return 1000000 }
 
 func (p *GeminiProvider) SetModel(model string) error {
 	for _, m := range geminiModels {

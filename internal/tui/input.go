@@ -9,6 +9,7 @@ import (
 // slashCompletions is the master list of completable slash commands, sorted alphabetically.
 var slashCompletions = []string{
 	"/clear",
+	"/compact",
 	"/copy",
 	"/exit",
 	"/help",
@@ -24,6 +25,7 @@ var slashCompletions = []string{
 // slashDescriptions maps each slash command to a short description shown in the popup.
 var slashDescriptions = map[string]string{
 	"/clear":                 "clear chat history",
+	"/compact":               "summarise conversation to free context",
 	"/copy":                  "copy last response to clipboard",
 	"/exit":                  "quit",
 	"/help":                  "show all commands and keyboard shortcuts",

@@ -48,6 +48,17 @@ func (p *OpenAIProvider) Name() string        { return p.name }
 func (p *OpenAIProvider) ActiveModel() string { return p.model }
 func (p *OpenAIProvider) Models() []string    { return openaiModels }
 
+func (p *OpenAIProvider) ContextWindow() int {
+	switch p.model {
+	case "gpt-4.1", "gpt-4.1-mini":
+		return 1000000
+	case "gpt-4o":
+		return 128000
+	default: // o3, o4-mini
+		return 200000
+	}
+}
+
 func (p *OpenAIProvider) SetModel(model string) error {
 	for _, m := range openaiModels {
 		if m == model {
@@ -120,6 +131,7 @@ func (p *OllamaProvider) fetchModels(baseURL string) ([]string, error) {
 func (p *OllamaProvider) Name() string        { return "ollama" }
 func (p *OllamaProvider) ActiveModel() string { return p.model }
 func (p *OllamaProvider) Models() []string    { return p.models }
+func (p *OllamaProvider) ContextWindow() int  { return 8192 }
 
 func (p *OllamaProvider) SetModel(model string) error {
 	for _, m := range p.models {

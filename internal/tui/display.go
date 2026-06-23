@@ -41,6 +41,13 @@ func truncate(s string, n int) string {
 
 func (t *TUI) renderLocked() {
 	var sb strings.Builder
+
+	// Update terminal tab title when the conversation topic changes.
+	if title := t.tabTitle(); title != t.lastTitle {
+		sb.WriteString("\033]0;" + title + "\007")
+		t.lastTitle = title
+	}
+
 	sb.WriteString(ansiHideCursor)
 	sb.WriteString(ansiClearScreen)
 
@@ -62,8 +69,16 @@ func (t *TUI) renderLocked() {
 	if t.systemPrompt != "" {
 		sysIndicator = "  [sys]"
 	}
+	ctxTokens := t.estimatedTokens()
+	ctxWin := t.contextWindow()
+	var ctxLabel string
+	if ctxWin > 0 {
+		ctxLabel = fmt.Sprintf("~%dk/%dk", ctxTokens/1000, ctxWin/1000)
+	} else {
+		ctxLabel = fmt.Sprintf("~%dk", ctxTokens/1000)
+	}
 	left := fmt.Sprintf(" kiln │  %s  │  permissions: %s%s  ", t.model, permLabel, sysIndicator)
-	right := "  Ctrl+C to exit "
+	right := fmt.Sprintf("  ctx: %s  Ctrl+C to exit ", ctxLabel)
 	pad := t.width - len(left) - len(right)
 	if pad < 0 {
 		pad = 0

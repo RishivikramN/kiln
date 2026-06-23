@@ -28,6 +28,7 @@ func (t *TUI) runChat(ctx context.Context) {
 			history = append(history, m)
 		}
 	}
+	history = pruneOldToolResults(history)
 
 	// add empty assistant placeholder — spinner will animate it
 	t.messages = append(t.messages, provider.Message{Role: "assistant", Content: ""})
@@ -172,4 +173,109 @@ func (t *TUI) runChat(ctx context.Context) {
 		t.mu.Unlock()
 		t.render()
 	}
+}
+
+// pruneOldToolResults replaces the content of tool-result messages that are
+// older than keepTurns user turns with a short stub. This keeps the provider's
+// context window from filling up with large file reads from earlier in the
+// conversation while preserving the overall conversation shape.
+const keepTurns = 3
+
+func pruneOldToolResults(history []provider.Message) []provider.Message {
+	turns := 0
+	for _, m := range history {
+		if m.Role == "user" {
+			turns++
+		}
+	}
+	cutoff := turns - keepTurns
+	if cutoff <= 0 {
+		return history
+	}
+
+	result := make([]provider.Message, len(history))
+	copy(result, history)
+
+	turn := 0
+	for i, m := range result {
+		if m.Role == "user" {
+			turn++
+		}
+		if turn > cutoff {
+			continue
+		}
+		switch m.Role {
+		case provider.RoleHistUsr:
+			result[i].Content = pruneHistUsr(m.Content)
+		case provider.RoleHistUsrOAI:
+			result[i].Content = pruneHistUsrOAI(m.Content)
+		case provider.RoleHistUsrClaude:
+			result[i].Content = pruneHistUsrClaude(m.Content)
+		case provider.RoleHistUsrGemini:
+			result[i].Content = pruneHistUsrGemini(m.Content)
+		}
+	}
+	return result
+}
+
+func pruneHistUsr(content string) string {
+	// "Tool result for read_file: <file contents>"
+	if i := strings.Index(content, ": "); i >= 0 {
+		return content[:i+2] + "[pruned]"
+	}
+	return "[pruned]"
+}
+
+func pruneHistUsrOAI(content string) string {
+	var r struct {
+		ToolCallID string `json:"tool_call_id"`
+		Content    string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(content), &r); err != nil {
+		return content
+	}
+	r.Content = "[pruned]"
+	b, _ := json.Marshal(r)
+	return string(b)
+}
+
+func pruneHistUsrClaude(content string) string {
+	var blocks []json.RawMessage
+	if err := json.Unmarshal([]byte(content), &blocks); err != nil {
+		return content
+	}
+	for i, raw := range blocks {
+		var block map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &block); err != nil {
+			continue
+		}
+		var typ string
+		if err := json.Unmarshal(block["type"], &typ); err == nil && typ == "tool_result" {
+			block["content"] = json.RawMessage(`"[pruned]"`)
+			b, err := json.Marshal(block)
+			if err == nil {
+				blocks[i] = json.RawMessage(b)
+			}
+		}
+	}
+	b, _ := json.Marshal(blocks)
+	return string(b)
+}
+
+func pruneHistUsrGemini(content string) string {
+	var parts []map[string]any
+	if err := json.Unmarshal([]byte(content), &parts); err != nil {
+		return content
+	}
+	for i, part := range parts {
+		if fr, ok := part["functionResponse"].(map[string]any); ok {
+			if resp, ok := fr["response"].(map[string]any); ok {
+				resp["output"] = "[pruned]"
+				fr["response"] = resp
+				parts[i]["functionResponse"] = fr
+			}
+		}
+	}
+	b, _ := json.Marshal(parts)
+	return string(b)
 }
