@@ -107,7 +107,7 @@ type gResponse struct {
 	} `json:"error,omitempty"`
 }
 
-func (p *GeminiProvider) Chat(ctx context.Context, systemPrompt string, messages []Message, tools []Tool, onToken func(string), onTool func(name, input, result string)) error {
+func (p *GeminiProvider) Chat(ctx context.Context, systemPrompt string, messages []Message, tools []Tool, onToken func(string), onTool func(name, input, result string), onHistory func(role, content string)) error {
 	req := gRequest{Contents: toGContents(messages)}
 	if systemPrompt != "" {
 		req.SystemInstruction = &gContent{Parts: []gPart{{Text: systemPrompt}}}
@@ -148,6 +148,9 @@ func (p *GeminiProvider) Chat(ctx context.Context, systemPrompt string, messages
 		for i := range calls {
 			modelParts = append(modelParts, gPart{FunctionCall: &calls[i]})
 		}
+		if astJSON, err2 := json.Marshal(modelParts); err2 == nil {
+			onHistory("hist_ast_gemini", string(astJSON))
+		}
 		req.Contents = append(req.Contents, gContent{Role: "model", Parts: modelParts})
 
 		// execute tools and append results
@@ -165,6 +168,9 @@ func (p *GeminiProvider) Chat(ctx context.Context, systemPrompt string, messages
 					Response: map[string]any{"output": result},
 				},
 			})
+		}
+		if resJSON, err2 := json.Marshal(resultParts); err2 == nil {
+			onHistory("hist_usr_gemini", string(resJSON))
 		}
 		req.Contents = append(req.Contents, gContent{Role: "user", Parts: resultParts})
 	}
@@ -224,13 +230,26 @@ func (p *GeminiProvider) stream(ctx context.Context, req gRequest, onChunk func(
 func toGContents(messages []Message) []gContent {
 	var out []gContent
 	for _, m := range messages {
-		role := m.Role
-		if role == "assistant" {
-			role = "model"
-		} else if role != "user" {
-			continue
+		switch m.Role {
+		case "user":
+			out = append(out, gContent{Role: "user", Parts: []gPart{{Text: m.Content}}})
+		case "assistant":
+			out = append(out, gContent{Role: "model", Parts: []gPart{{Text: m.Content}}})
+		case "hist_ast":
+			out = append(out, gContent{Role: "model", Parts: []gPart{{Text: m.Content}}})
+		case "hist_usr":
+			out = append(out, gContent{Role: "user", Parts: []gPart{{Text: m.Content}}})
+		case "hist_ast_gemini":
+			var parts []gPart
+			if json.Unmarshal([]byte(m.Content), &parts) == nil {
+				out = append(out, gContent{Role: "model", Parts: parts})
+			}
+		case "hist_usr_gemini":
+			var parts []gPart
+			if json.Unmarshal([]byte(m.Content), &parts) == nil {
+				out = append(out, gContent{Role: "user", Parts: parts})
+			}
 		}
-		out = append(out, gContent{Role: role, Parts: []gPart{{Text: m.Content}}})
 	}
 	return out
 }

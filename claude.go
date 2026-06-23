@@ -97,7 +97,7 @@ type cSSEData struct {
 	} `json:"delta,omitempty"`
 }
 
-func (p *ClaudeProvider) Chat(ctx context.Context, systemPrompt string, messages []Message, tools []Tool, onToken func(string), onTool func(name, input, result string)) error {
+func (p *ClaudeProvider) Chat(ctx context.Context, systemPrompt string, messages []Message, tools []Tool, onToken func(string), onTool func(name, input, result string), onHistory func(role, content string)) error {
 	msgs := toCMessages(messages)
 	var cTools []cTool
 	for _, t := range tools {
@@ -182,6 +182,11 @@ func (p *ClaudeProvider) Chat(ctx context.Context, systemPrompt string, messages
 				Input: inputRaw,
 			})
 		}
+
+		// persist the assistant turn (tool_use blocks) for multi-turn history
+		if astJSON, err2 := json.Marshal(assistantBlocks); err2 == nil {
+			onHistory("hist_ast_claude", string(astJSON))
+		}
 		msgs = append(msgs, cMessage{Role: "assistant", Content: assistantBlocks})
 
 		// execute tools and collect results
@@ -197,6 +202,10 @@ func (p *ClaudeProvider) Chat(ctx context.Context, systemPrompt string, messages
 				ToolUseID: ab.ID,
 				Content:   result,
 			})
+		}
+		// persist the user turn (tool_result blocks) for multi-turn history
+		if resJSON, err2 := json.Marshal(resultBlocks); err2 == nil {
+			onHistory("hist_usr_claude", string(resJSON))
 		}
 		msgs = append(msgs, cMessage{Role: "user", Content: resultBlocks})
 	}
@@ -246,10 +255,24 @@ func (p *ClaudeProvider) stream(ctx context.Context, req cRequest, onEvent func(
 func toCMessages(messages []Message) []cMessage {
 	var out []cMessage
 	for _, m := range messages {
-		if m.Role != "user" && m.Role != "assistant" {
-			continue
+		switch m.Role {
+		case "user", "assistant":
+			out = append(out, cMessage{Role: m.Role, Content: m.Content})
+		case "hist_ast":
+			out = append(out, cMessage{Role: "assistant", Content: m.Content})
+		case "hist_usr":
+			out = append(out, cMessage{Role: "user", Content: m.Content})
+		case "hist_ast_claude":
+			var blocks []cBlock
+			if json.Unmarshal([]byte(m.Content), &blocks) == nil {
+				out = append(out, cMessage{Role: "assistant", Content: blocks})
+			}
+		case "hist_usr_claude":
+			var blocks []cBlock
+			if json.Unmarshal([]byte(m.Content), &blocks) == nil {
+				out = append(out, cMessage{Role: "user", Content: blocks})
+			}
 		}
-		out = append(out, cMessage{Role: m.Role, Content: m.Content})
 	}
 	return out
 }

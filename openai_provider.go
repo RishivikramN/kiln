@@ -53,8 +53,8 @@ func (p *OpenAIProvider) SetModel(model string) error {
 	return fmt.Errorf("unknown openai model: %s", model)
 }
 
-func (p *OpenAIProvider) Chat(ctx context.Context, systemPrompt string, messages []Message, tools []Tool, onToken func(string), onTool func(name, input, result string)) error {
-	return openaiChat(ctx, &p.client, p.model, systemPrompt, messages, tools, onToken, onTool, false)
+func (p *OpenAIProvider) Chat(ctx context.Context, systemPrompt string, messages []Message, tools []Tool, onToken func(string), onTool func(name, input, result string), onHistory func(role, content string)) error {
+	return openaiChat(ctx, &p.client, p.model, systemPrompt, messages, tools, onToken, onTool, onHistory, false)
 }
 
 // OllamaProvider reuses the OpenAI-compatible Ollama endpoint.
@@ -125,16 +125,16 @@ func (p *OllamaProvider) SetModel(model string) error {
 	return fmt.Errorf("unknown ollama model: %s", model)
 }
 
-func (p *OllamaProvider) Chat(ctx context.Context, systemPrompt string, messages []Message, tools []Tool, onToken func(string), onTool func(name, input, result string)) error {
+func (p *OllamaProvider) Chat(ctx context.Context, systemPrompt string, messages []Message, tools []Tool, onToken func(string), onTool func(name, input, result string), onHistory func(role, content string)) error {
 	// Ollama models handle tool results better as plain user messages than as
 	// structured tool_result blocks (many local models ignore the latter).
-	return openaiChat(ctx, &p.client, p.model, systemPrompt, messages, tools, onToken, onTool, true)
+	return openaiChat(ctx, &p.client, p.model, systemPrompt, messages, tools, onToken, onTool, onHistory, true)
 }
 
 // openaiChat is the shared tool-calling loop for OpenAI and Ollama.
 // textToolResults=true sends tool results as plain UserMessages instead of
 // structured ToolMessages — required for Ollama models that ignore the latter.
-func openaiChat(ctx context.Context, client *openai.Client, model, systemPrompt string, messages []Message, tools []Tool, onToken func(string), onTool func(name, input, result string), textToolResults bool) error {
+func openaiChat(ctx context.Context, client *openai.Client, model, systemPrompt string, messages []Message, tools []Tool, onToken func(string), onTool func(name, input, result string), onHistory func(role, content string), textToolResults bool) error {
 	msgs := toOpenAIMessages(messages)
 	if systemPrompt != "" {
 		msgs = append([]openai.ChatCompletionMessageParamUnion{openai.SystemMessage(systemPrompt)}, msgs...)
@@ -185,9 +185,13 @@ func openaiChat(ctx context.Context, client *openai.Client, model, systemPrompt 
 					if execErr != nil {
 						result = execErr.Error()
 					}
+					// onTool first (display), then history entries.
 					onTool(name, argsJSON, result)
+					resultText := "Tool result for " + name + ": " + result
+					onHistory("hist_ast", content)
+					onHistory("hist_usr", resultText)
 					msgs = append(msgs, openai.AssistantMessage(content))
-					msgs = append(msgs, openai.UserMessage("Tool result for "+name+": "+result))
+					msgs = append(msgs, openai.UserMessage(resultText))
 					continue
 				}
 			}
@@ -197,19 +201,42 @@ func openaiChat(ctx context.Context, client *openai.Client, model, systemPrompt 
 			return nil
 		}
 
-		// Add assistant message with tool calls to history.
-		msgs = append(msgs, choice.Message.ToParam())
-
-		// Execute each tool call and add results.
-		for _, tc := range choice.Message.ToolCalls {
-			result, execErr := runTool(tools, tc.Function.Name, tc.Function.Arguments, "", nil)
-			if execErr != nil {
-				result = execErr.Error()
+		if textToolResults {
+			// Ollama structured path: store as text-mode history so future context
+			// uses the same plain-text format the model was trained on.
+			for _, tc := range choice.Message.ToolCalls {
+				synthContent := fmt.Sprintf(`{"name":%q,"arguments":%s}`, tc.Function.Name, tc.Function.Arguments)
+				resultText := "Tool result for " + tc.Function.Name + ": "
+				result, execErr := runTool(tools, tc.Function.Name, tc.Function.Arguments, "", nil)
+				if execErr != nil {
+					result = execErr.Error()
+				}
+				resultText += result
+				onHistory("hist_ast", synthContent)
+				onTool(tc.Function.Name, tc.Function.Arguments, result)
+				onHistory("hist_usr", resultText)
+				msgs = append(msgs, openai.AssistantMessage(synthContent))
+				msgs = append(msgs, openai.UserMessage(resultText))
 			}
-			onTool(tc.Function.Name, tc.Function.Arguments, result)
-			if textToolResults {
-				msgs = append(msgs, openai.UserMessage("Tool result for "+tc.Function.Name+": "+result))
-			} else {
+		} else {
+			// OpenAI structured path: serialize the full assistant message so it can
+			// be reconstructed with intact tool_call IDs on the next turn.
+			msgJSON, _ := json.Marshal(choice.Message)
+			onHistory("hist_ast_oai", string(msgJSON))
+			msgs = append(msgs, choice.Message.ToParam())
+
+			for _, tc := range choice.Message.ToolCalls {
+				result, execErr := runTool(tools, tc.Function.Name, tc.Function.Arguments, "", nil)
+				if execErr != nil {
+					result = execErr.Error()
+				}
+				onTool(tc.Function.Name, tc.Function.Arguments, result)
+				type oaiResult struct {
+					ToolCallID string `json:"tool_call_id"`
+					Content    string `json:"content"`
+				}
+				resJSON, _ := json.Marshal(oaiResult{tc.ID, result})
+				onHistory("hist_usr_oai", string(resJSON))
 				msgs = append(msgs, openai.ToolMessage(result, tc.ID))
 			}
 		}
@@ -300,6 +327,24 @@ func toOpenAIMessages(messages []Message) []openai.ChatCompletionMessageParamUni
 			out = append(out, openai.UserMessage(m.Content))
 		case "assistant":
 			out = append(out, openai.AssistantMessage(m.Content))
+		case "hist_ast":
+			out = append(out, openai.AssistantMessage(m.Content))
+		case "hist_usr":
+			out = append(out, openai.UserMessage(m.Content))
+		case "hist_ast_oai":
+			// Reconstruct the original assistant message with tool_calls intact.
+			var msg openai.ChatCompletionMessage
+			if json.Unmarshal([]byte(m.Content), &msg) == nil {
+				out = append(out, msg.ToParam())
+			}
+		case "hist_usr_oai":
+			var r struct {
+				ToolCallID string `json:"tool_call_id"`
+				Content    string `json:"content"`
+			}
+			if json.Unmarshal([]byte(m.Content), &r) == nil {
+				out = append(out, openai.ToolMessage(r.Content, r.ToolCallID))
+			}
 		}
 	}
 	return out

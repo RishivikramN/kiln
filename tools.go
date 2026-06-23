@@ -132,12 +132,17 @@ func defaultTools() []Tool {
 				if err != nil {
 					return "", err
 				}
+				// read old content for diff (empty string if file is new)
+				oldBytes, _ := os.ReadFile(target)
 				if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 					return "", err
 				}
 				if err := os.WriteFile(target, []byte(content), 0644); err != nil {
 					return "", err
 				}
+				// compute and stash the diff for the TUI to pick up in onTool
+				d := diffFiles(string(oldBytes), content, rel)
+				storePendingDiff(rel, d)
 				return fmt.Sprintf("wrote %d bytes to %s", len(content), rel), nil
 			},
 		},

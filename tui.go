@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -36,7 +37,8 @@ func moveTo(row, col int) string {
 type Message struct {
 	Role    string
 	Content string
-	Tokens  int // estimated tokens for tool messages (input+output / 4)
+	Tokens  int         // estimated tokens for tool messages (input+output / 4)
+	Diff    *DiffResult // set for "diff" role messages
 }
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -66,6 +68,7 @@ type TUI struct {
 	scrollOffset int
 	quit         bool
 	responding   bool
+	chatCancel   func() // non-nil while a Chat() call is in flight
 
 	provider  Provider
 	providers map[string]Provider
@@ -211,8 +214,22 @@ func (t *TUI) Run() error {
 		}
 		t.render()
 
-		if t.responding {
-			t.runChat()
+		t.mu.Lock()
+		shouldStart := t.responding && t.chatCancel == nil
+		t.mu.Unlock()
+		if shouldStart {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			t.mu.Lock()
+			t.chatCancel = cancel
+			t.mu.Unlock()
+			go func() {
+				t.runChat(ctx)
+				cancel()
+				t.mu.Lock()
+				t.chatCancel = nil
+				t.mu.Unlock()
+				t.render()
+			}()
 		}
 	}
 }
@@ -225,7 +242,15 @@ func (t *TUI) handleKey(b []byte) bool {
 	// single-byte control codes
 	if len(b) == 1 {
 		switch b[0] {
-		case 3, 4: // Ctrl+C, Ctrl+D
+		case 3, 4: // Ctrl+C, Ctrl+D — cancel active request, or exit if none
+			t.mu.Lock()
+			cancel := t.chatCancel
+			t.chatCancel = nil
+			t.mu.Unlock()
+			if cancel != nil {
+				cancel()
+				return true
+			}
 			return false
 		case 12: // Ctrl+L — redraw
 			return true
@@ -321,12 +346,17 @@ func (t *TUI) submit() {
 	t.scrollOffset = 0
 }
 
-func (t *TUI) runChat() {
+func (t *TUI) runChat(ctx context.Context) {
 	t.responding = false
 
 	var history []Message
 	for _, m := range t.messages {
-		if m.Role == "user" || m.Role == "assistant" {
+		switch m.Role {
+		case "user", "assistant",
+			"hist_ast", "hist_usr",
+			"hist_ast_oai", "hist_usr_oai",
+			"hist_ast_claude", "hist_usr_claude",
+			"hist_ast_gemini", "hist_usr_gemini":
 			history = append(history, m)
 		}
 	}
@@ -406,8 +436,13 @@ func (t *TUI) runChat() {
 		sysPrompt += "\n\nSession instructions: " + t.systemPrompt
 	}
 
+	// Disable Qwen3 extended thinking — it can stall for 15+ minutes per call.
+	if t.provider.Name() == "ollama" {
+		sysPrompt += "\n/no_think"
+	}
+
 	firstToken := true
-	err := t.provider.Chat(context.Background(), sysPrompt, history, tools,
+	err := t.provider.Chat(ctx, sysPrompt, history, tools,
 		func(token string) {
 			if firstToken {
 				// stop spinner before first write
@@ -428,6 +463,18 @@ func (t *TUI) runChat() {
 				Content: name,
 				Tokens:  approxTokens,
 			})
+			// if write_file ran, retrieve and display the diff
+			if name == "write_file" {
+				var args struct {
+					Path string `json:"path"`
+				}
+				if json.Unmarshal([]byte(input), &args) == nil && args.Path != "" {
+					if d, ok := takePendingDiff(args.Path); ok {
+						dr := d
+						t.messages = append(t.messages, Message{Role: "diff", Diff: &dr})
+					}
+				}
+			}
 			// keep assistant placeholder at end
 			last := t.messages[idx]
 			t.messages = append(t.messages[:idx], t.messages[idx+1:]...)
@@ -435,6 +482,15 @@ func (t *TUI) runChat() {
 			idx = len(t.messages) - 1
 			t.mu.Unlock()
 			t.render()
+		},
+		func(role, content string) {
+			// Insert the history message immediately before the assistant placeholder
+			// so that tool call context is preserved across conversation turns.
+			t.mu.Lock()
+			entry := Message{Role: role, Content: content}
+			t.messages = append(t.messages[:idx], append([]Message{entry}, t.messages[idx:]...)...)
+			idx++ // placeholder shifted one position forward
+			t.mu.Unlock()
 		},
 	)
 
@@ -766,6 +822,12 @@ func (t *TUI) chatLines() []string {
 				tok = fmt.Sprintf(" · ~%d tokens", msg.Tokens)
 			}
 			lines = append(lines, ansiDim+"  ⚙ "+toolSummary(msg.Content)+tok+ansiReset)
+
+		case "diff":
+			if msg.Diff != nil {
+				lines = append(lines, renderDiff(*msg.Diff, w)...)
+				lines = append(lines, "")
+			}
 
 		case "assistant":
 			content := msg.Content
