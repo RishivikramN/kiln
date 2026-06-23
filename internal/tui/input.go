@@ -6,6 +6,36 @@ import (
 	"kiln/internal/provider"
 )
 
+// slashCompletions is the master list of completable slash commands, sorted alphabetically.
+var slashCompletions = []string{
+	"/clear",
+	"/copy",
+	"/exit",
+	"/help",
+	"/models",
+	"/permissions",
+	"/permissions allow",
+	"/permissions deny",
+	"/permissions read-only",
+	"/system",
+	"/undo",
+}
+
+// slashDescriptions maps each slash command to a short description shown in the popup.
+var slashDescriptions = map[string]string{
+	"/clear":                 "clear chat history",
+	"/copy":                  "copy last response to clipboard",
+	"/exit":                  "quit",
+	"/help":                  "show all commands and keyboard shortcuts",
+	"/models":                "list or switch models",
+	"/permissions":           "show repo permissions",
+	"/permissions allow":     "grant read+write access to this repo",
+	"/permissions deny":      "revoke access to this repo",
+	"/permissions read-only": "grant read-only access to this repo",
+	"/system":                "set or clear a custom system prompt",
+	"/undo":                  "remove the last exchange",
+}
+
 func (t *TUI) handleKey(b []byte) bool {
 	if len(b) == 0 {
 		return true
@@ -24,6 +54,16 @@ func (t *TUI) handleKey(b []byte) bool {
 				return true
 			}
 			return false
+		case 9: // Tab — accept selected completion (fill without submitting)
+			t.acceptCompletion()
+			return true
+		case 27: // Escape — dismiss autocomplete popup
+			if len(t.completions) > 0 {
+				t.completions = nil
+				t.completionIdx = -1
+				return true
+			}
+			return true
 		case 12: // Ctrl+L — redraw
 			return true
 		case 1: // Ctrl+A — move to beginning
@@ -34,6 +74,7 @@ func (t *TUI) handleKey(b []byte) bool {
 			return true
 		case 11: // Ctrl+K — delete to end of line
 			t.input = t.input[:t.cursorPos]
+			t.recomputeCompletions()
 			return true
 		case 127: // Backspace — delete char before cursor
 			if t.cursorPos > 0 {
@@ -41,8 +82,12 @@ func (t *TUI) handleKey(b []byte) bool {
 				t.cursorPos--
 			}
 			t.historyIdx = -1
+			t.recomputeCompletions()
 			return true
-		case 13: // Enter
+		case 13: // Enter — accept selected completion and submit, or submit as-is
+			if len(t.completions) > 0 && t.completionIdx >= 0 {
+				t.acceptCompletion()
+			}
 			t.submit()
 			return !t.quit
 		}
@@ -91,10 +136,22 @@ func (t *TUI) handleKey(b []byte) bool {
 			}
 			// Simple and tilde sequences
 			switch {
-			case b[2] == 'A': // ↑ — history prev
-				t.historyPrev()
-			case b[2] == 'B': // ↓ — history next
-				t.historyNext()
+			case b[2] == 'A': // ↑ — completion up, or history prev
+				if len(t.completions) > 0 {
+					if t.completionIdx > 0 {
+						t.completionIdx--
+					}
+				} else {
+					t.historyPrev()
+				}
+			case b[2] == 'B': // ↓ — completion down, or history next
+				if len(t.completions) > 0 {
+					if t.completionIdx < len(t.completions)-1 {
+						t.completionIdx++
+					}
+				} else {
+					t.historyNext()
+				}
 			case b[2] == 'C': // → — char right
 				if t.cursorPos < len(t.input) {
 					t.cursorPos++
@@ -112,6 +169,7 @@ func (t *TUI) handleKey(b []byte) bool {
 			case b[2] == '3' && len(b) >= 4 && b[3] == '~': // Delete
 				if t.cursorPos < len(t.input) {
 					t.input = append(t.input[:t.cursorPos], t.input[t.cursorPos+1:]...)
+					t.recomputeCompletions()
 				}
 			case b[2] == '4' && len(b) >= 4 && b[3] == '~': // End (alt)
 				t.cursorPos = len(t.input)
@@ -136,8 +194,48 @@ func (t *TUI) handleKey(b []byte) bool {
 			t.cursorPos++
 		}
 		t.historyIdx = -1
+		t.recomputeCompletions()
 	}
 	return !t.quit
+}
+
+func (t *TUI) recomputeCompletions() {
+	text := string(t.input)
+	if !strings.HasPrefix(text, "/") {
+		t.completions = nil
+		t.completionIdx = -1
+		return
+	}
+	var matches []string
+	for _, cmd := range slashCompletions {
+		if strings.HasPrefix(cmd, text) {
+			matches = append(matches, cmd)
+		}
+	}
+	// hide if the only match is exactly what's already typed
+	if len(matches) == 1 && matches[0] == text {
+		t.completions = nil
+		t.completionIdx = -1
+		return
+	}
+	t.completions = matches
+	if len(matches) == 0 {
+		t.completionIdx = -1
+	} else if t.completionIdx < 0 {
+		t.completionIdx = 0
+	} else if t.completionIdx >= len(matches) {
+		t.completionIdx = len(matches) - 1
+	}
+}
+
+func (t *TUI) acceptCompletion() {
+	if t.completionIdx < 0 || t.completionIdx >= len(t.completions) {
+		return
+	}
+	t.input = []rune(t.completions[t.completionIdx])
+	t.cursorPos = len(t.input)
+	t.completions = nil
+	t.completionIdx = -1
 }
 
 func (t *TUI) cursorWordLeft() {
@@ -196,6 +294,8 @@ func (t *TUI) submit() {
 	t.input = t.input[:0]
 	t.cursorPos = 0
 	t.historyIdx = -1
+	t.completions = nil
+	t.completionIdx = -1
 	if text == "" {
 		return
 	}

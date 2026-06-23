@@ -32,6 +32,10 @@ type TUI struct {
 	historyTmp string
 	cursorPos  int // insertion point within t.input (rune index)
 
+	// slash-command autocomplete
+	completions   []string
+	completionIdx int // -1 when popup is hidden
+
 	// spinner state (atomic so goroutine can update without the mutex)
 	spinning     int32 // 1 while waiting for first token
 	spinnerIdx   int32
@@ -63,11 +67,12 @@ type winsize struct {
 func NewTUI() *TUI {
 	cwd, _ := os.Getwd()
 	t := &TUI{
-		model:      "none",
-		repo:       filepath.Base(cwd),
-		repoPath:   cwd,
-		providers:  make(map[string]provider.Provider),
-		historyIdx: -1,
+		model:         "none",
+		repo:          filepath.Base(cwd),
+		repoPath:      cwd,
+		providers:     make(map[string]provider.Provider),
+		historyIdx:    -1,
+		completionIdx: -1,
 	}
 	if ps, err := permissions.LoadPermStore(); err == nil {
 		t.permStore = ps

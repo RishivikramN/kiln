@@ -123,7 +123,70 @@ func (t *TUI) renderLocked() {
 		sb.WriteString("█")
 	}
 
+	t.renderCompletionsLocked(&sb)
+
 	fmt.Print(sb.String())
+}
+
+// renderCompletionsLocked draws the autocomplete popup above the bottom divider.
+// Called with t.mu already held.
+func (t *TUI) renderCompletionsLocked(sb *strings.Builder) {
+	if len(t.completions) == 0 {
+		return
+	}
+
+	const maxVisible = 6
+	const cmdCol = 26 // fixed width for the command column
+	const ansiHighlight = "\033[48;5;237m"
+
+	n := len(t.completions)
+
+	// scroll window so the selected item stays visible
+	start := t.completionIdx - maxVisible/2
+	if start < 0 {
+		start = 0
+	}
+	if start+maxVisible > n {
+		start = n - maxVisible
+	}
+	if start < 0 {
+		start = 0
+	}
+	end := start + maxVisible
+	if end > n {
+		end = n
+	}
+	visible := t.completions[start:end]
+
+	// items sit above the bottom divider (height-1), not overlaying it
+	for i, cmd := range visible {
+		row := t.height - 1 - len(visible) + i
+		if row < 3 {
+			continue
+		}
+		desc := slashDescriptions[cmd]
+		absIdx := start + i
+
+		sb.WriteString(moveTo(row, 1))
+		sb.WriteString(ansiClearLine)
+
+		if absIdx == t.completionIdx {
+			// selected: subtle background, bright command, dim description
+			cmdPart := fmt.Sprintf("%-*s", cmdCol, cmd)
+			sb.WriteString(ansiHighlight + "  " + ansiCyan + ansiBold + cmdPart + ansiReset)
+			sb.WriteString(ansiHighlight + ansiDim + desc + ansiReset)
+			// fill rest of line with highlight bg so the row feels full-width
+			used := 2 + cmdCol + len(desc)
+			if pad := t.width - used; pad > 0 {
+				sb.WriteString(ansiHighlight + strings.Repeat(" ", pad) + ansiReset)
+			}
+		} else {
+			// non-selected: dim command in cyan, dim description
+			cmdPart := fmt.Sprintf("%-*s", cmdCol, cmd)
+			sb.WriteString("  " + ansiDim + ansiCyan + cmdPart + ansiReset)
+			sb.WriteString(ansiDim + desc + ansiReset)
+		}
+	}
 }
 
 func (t *TUI) chatLines() []string {
