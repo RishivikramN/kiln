@@ -1,4 +1,4 @@
-package main
+package tools
 
 import (
 	"bytes"
@@ -10,25 +10,21 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"kiln/internal/diff"
+	"kiln/internal/permissions"
+	"kiln/internal/provider"
 )
 
-// Tool defines a function the model can call.
-type Tool struct {
-	Name        string
-	Description string
-	Parameters  map[string]any // JSON Schema object
-	Execute     func(repoPath string, perms *PermStore, input map[string]any) (string, error)
-}
-
-// readTools returns only the read-only subset of built-in tools.
-func readTools() []Tool {
-	all := defaultTools()
+// ReadTools returns only the read-only subset of built-in tools.
+func ReadTools() []provider.Tool {
+	all := DefaultTools()
 	return all[:2] // list_files, read_file
 }
 
-// defaultTools returns the built-in file system and shell tools.
-func defaultTools() []Tool {
-	return []Tool{
+// DefaultTools returns the built-in file system and shell tools.
+func DefaultTools() []provider.Tool {
+	return []provider.Tool{
 		{
 			Name:        "list_files",
 			Description: "List files and directories at a path in the repository. Use '.' for the root.",
@@ -42,7 +38,7 @@ func defaultTools() []Tool {
 				},
 				"required": []string{"path"},
 			},
-			Execute: func(repoPath string, perms *PermStore, input map[string]any) (string, error) {
+			Execute: func(repoPath string, perms *permissions.PermStore, input map[string]any) (string, error) {
 				if perms != nil && !perms.CanRead(repoPath) {
 					return "", fmt.Errorf("read permission denied — use /permissions allow")
 				}
@@ -50,7 +46,7 @@ func defaultTools() []Tool {
 				if rel == "" {
 					rel = "."
 				}
-				target, err := safeJoin(repoPath, rel)
+				target, err := SafeJoin(repoPath, rel)
 				if err != nil {
 					return "", err
 				}
@@ -85,12 +81,12 @@ func defaultTools() []Tool {
 				},
 				"required": []string{"path"},
 			},
-			Execute: func(repoPath string, perms *PermStore, input map[string]any) (string, error) {
+			Execute: func(repoPath string, perms *permissions.PermStore, input map[string]any) (string, error) {
 				if perms != nil && !perms.CanRead(repoPath) {
 					return "", fmt.Errorf("read permission denied — use /permissions allow")
 				}
 				rel, _ := input["path"].(string)
-				target, err := safeJoin(repoPath, rel)
+				target, err := SafeJoin(repoPath, rel)
 				if err != nil {
 					return "", err
 				}
@@ -122,13 +118,13 @@ func defaultTools() []Tool {
 				},
 				"required": []string{"path", "content"},
 			},
-			Execute: func(repoPath string, perms *PermStore, input map[string]any) (string, error) {
+			Execute: func(repoPath string, perms *permissions.PermStore, input map[string]any) (string, error) {
 				if perms != nil && !perms.CanWrite(repoPath) {
 					return "", fmt.Errorf("write permission denied — use /permissions allow")
 				}
 				rel, _ := input["path"].(string)
 				content, _ := input["content"].(string)
-				target, err := safeJoin(repoPath, rel)
+				target, err := SafeJoin(repoPath, rel)
 				if err != nil {
 					return "", err
 				}
@@ -141,8 +137,8 @@ func defaultTools() []Tool {
 					return "", err
 				}
 				// compute and stash the diff for the TUI to pick up in onTool
-				d := diffFiles(string(oldBytes), content, rel)
-				storePendingDiff(rel, d)
+				d := diff.Compute(string(oldBytes), content, rel)
+				diff.StorePending(rel, d)
 				return fmt.Sprintf("wrote %d bytes to %s", len(content), rel), nil
 			},
 		},
@@ -159,7 +155,7 @@ func defaultTools() []Tool {
 				},
 				"required": []string{"command"},
 			},
-			Execute: func(repoPath string, perms *PermStore, input map[string]any) (string, error) {
+			Execute: func(repoPath string, perms *permissions.PermStore, input map[string]any) (string, error) {
 				if perms != nil && !perms.CanWrite(repoPath) {
 					return "", fmt.Errorf("run_command requires read-write permission — use /permissions allow")
 				}
@@ -188,8 +184,8 @@ func defaultTools() []Tool {
 	}
 }
 
-// safeJoin joins repoPath and rel, rejecting path traversal attempts.
-func safeJoin(repoPath, rel string) (string, error) {
+// SafeJoin joins repoPath and rel, rejecting path traversal attempts.
+func SafeJoin(repoPath, rel string) (string, error) {
 	target := filepath.Join(repoPath, filepath.Clean(rel))
 	if !strings.HasPrefix(target+string(filepath.Separator), repoPath+string(filepath.Separator)) {
 		return "", fmt.Errorf("path %q is outside the repository", rel)
@@ -197,8 +193,8 @@ func safeJoin(repoPath, rel string) (string, error) {
 	return target, nil
 }
 
-// runTool finds the named tool and executes it with the given JSON input.
-func runTool(tools []Tool, name, inputJSON, repoPath string, perms *PermStore) (string, error) {
+// RunTool finds the named tool and executes it with the given JSON input.
+func RunTool(tools []provider.Tool, name, inputJSON, repoPath string, perms *permissions.PermStore) (string, error) {
 	var input map[string]any
 	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
 		return "", fmt.Errorf("invalid tool input: %w", err)

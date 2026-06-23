@@ -1,4 +1,4 @@
-package main
+package permissions
 
 import (
 	"encoding/json"
@@ -8,16 +8,19 @@ import (
 	"time"
 )
 
+// RepoPermission stores the access mode for a repository path.
 type RepoPermission struct {
 	Mode      string `json:"mode"`       // "read-write", "read-only", "none"
 	UpdatedAt string `json:"updated_at"`
 }
 
+// PermStore persists per-repo permission modes to ~/.kiln/permissions.json.
 type PermStore struct {
 	path  string
 	perms map[string]RepoPermission
 }
 
+// LoadPermStore loads (or creates) the permission store from ~/.kiln/permissions.json.
 func LoadPermStore() (*PermStore, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -43,11 +46,13 @@ func LoadPermStore() (*PermStore, error) {
 	return s, nil
 }
 
+// Get returns the permission for the given repo path.
 func (s *PermStore) Get(repoPath string) (RepoPermission, bool) {
 	p, ok := s.perms[repoPath]
 	return p, ok
 }
 
+// Set updates the permission mode for the given repo path and persists it.
 func (s *PermStore) Set(repoPath, mode string) error {
 	switch mode {
 	case "read-write", "read-only", "none":
@@ -61,16 +66,19 @@ func (s *PermStore) Set(repoPath, mode string) error {
 	return s.save()
 }
 
+// CanRead returns true if the repo has read-only or read-write permission.
 func (s *PermStore) CanRead(repoPath string) bool {
 	p, ok := s.perms[repoPath]
 	return ok && (p.Mode == "read-only" || p.Mode == "read-write")
 }
 
+// CanWrite returns true if the repo has read-write permission.
 func (s *PermStore) CanWrite(repoPath string) bool {
 	p, ok := s.perms[repoPath]
 	return ok && p.Mode == "read-write"
 }
 
+// All returns a copy of all stored permissions.
 func (s *PermStore) All() map[string]RepoPermission {
 	out := make(map[string]RepoPermission, len(s.perms))
 	for k, v := range s.perms {
@@ -87,7 +95,8 @@ func (s *PermStore) save() error {
 	return os.WriteFile(s.path, data, 0600)
 }
 
-func modeShort(mode string) string {
+// ModeShort returns a short label for a permission mode ("rw", "ro", "--").
+func ModeShort(mode string) string {
 	switch mode {
 	case "read-write":
 		return "rw"

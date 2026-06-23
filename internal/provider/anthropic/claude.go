@@ -1,4 +1,4 @@
-package main
+package anthropic
 
 import (
 	"bufio"
@@ -9,6 +9,9 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"kiln/internal/provider"
+	"kiln/internal/tools"
 )
 
 const (
@@ -22,11 +25,13 @@ var claudeModels = []string{
 	"claude-haiku-4-5-20251001",
 }
 
+// ClaudeProvider implements provider.Provider using the Anthropic REST API.
 type ClaudeProvider struct {
 	apiKey string
 	model  string
 }
 
+// NewClaudeProvider creates a ClaudeProvider from the ANTHROPIC_API_KEY environment variable.
 func NewClaudeProvider() (*ClaudeProvider, error) {
 	key := os.Getenv("ANTHROPIC_API_KEY")
 	if key == "" {
@@ -82,8 +87,8 @@ type cRequest struct {
 }
 
 type cSSEData struct {
-	Type  string `json:"type"`
-	Index int    `json:"index"`
+	Type         string `json:"type"`
+	Index        int    `json:"index"`
 	ContentBlock *struct {
 		Type string `json:"type"`
 		ID   string `json:"id"`
@@ -97,10 +102,10 @@ type cSSEData struct {
 	} `json:"delta,omitempty"`
 }
 
-func (p *ClaudeProvider) Chat(ctx context.Context, systemPrompt string, messages []Message, tools []Tool, onToken func(string), onTool func(name, input, result string), onHistory func(role, content string)) error {
+func (p *ClaudeProvider) Chat(ctx context.Context, systemPrompt string, messages []provider.Message, providerTools []provider.Tool, onToken func(string), onTool func(name, input, result string), onHistory func(role, content string)) error {
 	msgs := toCMessages(messages)
 	var cTools []cTool
-	for _, t := range tools {
+	for _, t := range providerTools {
 		cTools = append(cTools, cTool{
 			Name:        t.Name,
 			Description: t.Description,
@@ -185,14 +190,14 @@ func (p *ClaudeProvider) Chat(ctx context.Context, systemPrompt string, messages
 
 		// persist the assistant turn (tool_use blocks) for multi-turn history
 		if astJSON, err2 := json.Marshal(assistantBlocks); err2 == nil {
-			onHistory("hist_ast_claude", string(astJSON))
+			onHistory(provider.RoleHistAstClaude, string(astJSON))
 		}
 		msgs = append(msgs, cMessage{Role: "assistant", Content: assistantBlocks})
 
 		// execute tools and collect results
 		var resultBlocks []cBlock
 		for _, ab := range assistantBlocks {
-			result, err := runTool(tools, ab.Name, string(ab.Input), "", nil)
+			result, err := tools.RunTool(providerTools, ab.Name, string(ab.Input), "", nil)
 			if err != nil {
 				result = err.Error()
 			}
@@ -205,7 +210,7 @@ func (p *ClaudeProvider) Chat(ctx context.Context, systemPrompt string, messages
 		}
 		// persist the user turn (tool_result blocks) for multi-turn history
 		if resJSON, err2 := json.Marshal(resultBlocks); err2 == nil {
-			onHistory("hist_usr_claude", string(resJSON))
+			onHistory(provider.RoleHistUsrClaude, string(resJSON))
 		}
 		msgs = append(msgs, cMessage{Role: "user", Content: resultBlocks})
 	}
@@ -252,22 +257,22 @@ func (p *ClaudeProvider) stream(ctx context.Context, req cRequest, onEvent func(
 	return scanner.Err()
 }
 
-func toCMessages(messages []Message) []cMessage {
+func toCMessages(messages []provider.Message) []cMessage {
 	var out []cMessage
 	for _, m := range messages {
 		switch m.Role {
 		case "user", "assistant":
 			out = append(out, cMessage{Role: m.Role, Content: m.Content})
-		case "hist_ast":
+		case provider.RoleHistAst:
 			out = append(out, cMessage{Role: "assistant", Content: m.Content})
-		case "hist_usr":
+		case provider.RoleHistUsr:
 			out = append(out, cMessage{Role: "user", Content: m.Content})
-		case "hist_ast_claude":
+		case provider.RoleHistAstClaude:
 			var blocks []cBlock
 			if json.Unmarshal([]byte(m.Content), &blocks) == nil {
 				out = append(out, cMessage{Role: "assistant", Content: blocks})
 			}
-		case "hist_usr_claude":
+		case provider.RoleHistUsrClaude:
 			var blocks []cBlock
 			if json.Unmarshal([]byte(m.Content), &blocks) == nil {
 				out = append(out, cMessage{Role: "user", Content: blocks})

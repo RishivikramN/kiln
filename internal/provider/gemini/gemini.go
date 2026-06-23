@@ -1,4 +1,4 @@
-package main
+package gemini
 
 import (
 	"bufio"
@@ -9,6 +9,9 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"kiln/internal/provider"
+	"kiln/internal/tools"
 )
 
 const geminiBaseURL = "https://generativelanguage.googleapis.com/v1beta/models"
@@ -19,11 +22,13 @@ var geminiModels = []string{
 	"gemini-2.0-flash",
 }
 
+// GeminiProvider implements provider.Provider using the Google Gemini REST API.
 type GeminiProvider struct {
 	apiKey string
 	model  string
 }
 
+// NewGeminiProvider creates a GeminiProvider from the GEMINI_API_KEY or GOOGLE_API_KEY environment variable.
 func NewGeminiProvider() (*GeminiProvider, error) {
 	key := os.Getenv("GEMINI_API_KEY")
 	if key == "" {
@@ -107,13 +112,13 @@ type gResponse struct {
 	} `json:"error,omitempty"`
 }
 
-func (p *GeminiProvider) Chat(ctx context.Context, systemPrompt string, messages []Message, tools []Tool, onToken func(string), onTool func(name, input, result string), onHistory func(role, content string)) error {
+func (p *GeminiProvider) Chat(ctx context.Context, systemPrompt string, messages []provider.Message, providerTools []provider.Tool, onToken func(string), onTool func(name, input, result string), onHistory func(role, content string)) error {
 	req := gRequest{Contents: toGContents(messages)}
 	if systemPrompt != "" {
 		req.SystemInstruction = &gContent{Parts: []gPart{{Text: systemPrompt}}}
 	}
-	if len(tools) > 0 {
-		req.Tools = []gTool{{FunctionDeclarations: toGDecls(tools)}}
+	if len(providerTools) > 0 {
+		req.Tools = []gTool{{FunctionDeclarations: toGDecls(providerTools)}}
 	}
 
 	for {
@@ -149,7 +154,7 @@ func (p *GeminiProvider) Chat(ctx context.Context, systemPrompt string, messages
 			modelParts = append(modelParts, gPart{FunctionCall: &calls[i]})
 		}
 		if astJSON, err2 := json.Marshal(modelParts); err2 == nil {
-			onHistory("hist_ast_gemini", string(astJSON))
+			onHistory(provider.RoleHistAstGemini, string(astJSON))
 		}
 		req.Contents = append(req.Contents, gContent{Role: "model", Parts: modelParts})
 
@@ -157,7 +162,7 @@ func (p *GeminiProvider) Chat(ctx context.Context, systemPrompt string, messages
 		resultParts := make([]gPart, 0, len(calls))
 		for _, fc := range calls {
 			inputJSON := argsToJSON(fc.Args)
-			result, err := runTool(tools, fc.Name, inputJSON, "", nil)
+			result, err := tools.RunTool(providerTools, fc.Name, inputJSON, "", nil)
 			if err != nil {
 				result = err.Error()
 			}
@@ -170,7 +175,7 @@ func (p *GeminiProvider) Chat(ctx context.Context, systemPrompt string, messages
 			})
 		}
 		if resJSON, err2 := json.Marshal(resultParts); err2 == nil {
-			onHistory("hist_usr_gemini", string(resJSON))
+			onHistory(provider.RoleHistUsrGemini, string(resJSON))
 		}
 		req.Contents = append(req.Contents, gContent{Role: "user", Parts: resultParts})
 	}
@@ -227,7 +232,7 @@ func (p *GeminiProvider) stream(ctx context.Context, req gRequest, onChunk func(
 	return scanner.Err()
 }
 
-func toGContents(messages []Message) []gContent {
+func toGContents(messages []provider.Message) []gContent {
 	var out []gContent
 	for _, m := range messages {
 		switch m.Role {
@@ -235,16 +240,16 @@ func toGContents(messages []Message) []gContent {
 			out = append(out, gContent{Role: "user", Parts: []gPart{{Text: m.Content}}})
 		case "assistant":
 			out = append(out, gContent{Role: "model", Parts: []gPart{{Text: m.Content}}})
-		case "hist_ast":
+		case provider.RoleHistAst:
 			out = append(out, gContent{Role: "model", Parts: []gPart{{Text: m.Content}}})
-		case "hist_usr":
+		case provider.RoleHistUsr:
 			out = append(out, gContent{Role: "user", Parts: []gPart{{Text: m.Content}}})
-		case "hist_ast_gemini":
+		case provider.RoleHistAstGemini:
 			var parts []gPart
 			if json.Unmarshal([]byte(m.Content), &parts) == nil {
 				out = append(out, gContent{Role: "model", Parts: parts})
 			}
-		case "hist_usr_gemini":
+		case provider.RoleHistUsrGemini:
 			var parts []gPart
 			if json.Unmarshal([]byte(m.Content), &parts) == nil {
 				out = append(out, gContent{Role: "user", Parts: parts})
@@ -254,9 +259,9 @@ func toGContents(messages []Message) []gContent {
 	return out
 }
 
-func toGDecls(tools []Tool) []gFuncDecl {
-	decls := make([]gFuncDecl, 0, len(tools))
-	for _, t := range tools {
+func toGDecls(providerTools []provider.Tool) []gFuncDecl {
+	decls := make([]gFuncDecl, 0, len(providerTools))
+	for _, t := range providerTools {
 		decls = append(decls, gFuncDecl{
 			Name:        t.Name,
 			Description: t.Description,

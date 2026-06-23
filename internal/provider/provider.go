@@ -1,6 +1,39 @@
-package main
+package provider
 
-import "context"
+import (
+	"context"
+
+	"kiln/internal/diff"
+	"kiln/internal/permissions"
+)
+
+// History role constants used across all providers and the TUI.
+const (
+	RoleHistAst       = "hist_ast"
+	RoleHistUsr       = "hist_usr"
+	RoleHistAstOAI    = "hist_ast_oai"
+	RoleHistUsrOAI    = "hist_usr_oai"
+	RoleHistAstClaude = "hist_ast_claude"
+	RoleHistUsrClaude = "hist_usr_claude"
+	RoleHistAstGemini = "hist_ast_gemini"
+	RoleHistUsrGemini = "hist_usr_gemini"
+)
+
+// Tool defines a function the model can call.
+type Tool struct {
+	Name        string
+	Description string
+	Parameters  map[string]any // JSON Schema object
+	Execute     func(repoPath string, perms *permissions.PermStore, input map[string]any) (string, error)
+}
+
+// Message is a single turn in the conversation history.
+type Message struct {
+	Role    string
+	Content string
+	Tokens  int          // estimated tokens for tool messages (input+output / 4)
+	Diff    *diff.Result // set for "diff" role messages
+}
 
 // Provider is the common interface all LLM backends implement.
 type Provider interface {

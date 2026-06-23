@@ -1,4 +1,4 @@
-package main
+package tui
 
 const systemPrompt = `You are Kiln, a terminal-based code assistant agent. You have tools. You call them yourself. You never ask the user to call them.
 
