@@ -18,6 +18,8 @@ var slashCompletions = []string{
 	"/permissions allow",
 	"/permissions deny",
 	"/permissions read-only",
+	"/sessions",
+	"/sessions clear",
 	"/system",
 	"/undo",
 }
@@ -34,12 +36,29 @@ var slashDescriptions = map[string]string{
 	"/permissions allow":     "grant read+write access to this repo",
 	"/permissions deny":      "revoke access to this repo",
 	"/permissions read-only": "grant read-only access to this repo",
+	"/sessions":              "show saved session info",
+	"/sessions clear":        "delete saved session for this repo",
 	"/system":                "set or clear a custom system prompt",
 	"/undo":                  "remove the last exchange",
 }
 
 func (t *TUI) handleKey(b []byte) bool {
 	if len(b) == 0 {
+		return true
+	}
+
+	// If a write-confirmation is pending, intercept all keypresses.
+	t.mu.Lock()
+	confirm := t.pendingConfirm
+	t.mu.Unlock()
+	if confirm != nil {
+		if len(b) == 1 {
+			reply := b[0] == 'y' || b[0] == 'Y'
+			select {
+			case confirm.replyCh <- reply:
+			default: // already answered; ignore duplicate keypress
+			}
+		}
 		return true
 	}
 

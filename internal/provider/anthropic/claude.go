@@ -27,8 +27,11 @@ var claudeModels = []string{
 
 // ClaudeProvider implements provider.Provider using the Anthropic REST API.
 type ClaudeProvider struct {
-	apiKey string
-	model  string
+	apiKey       string
+	model        string
+	maxToolCalls int
+	lastInputTok int
+	lastOutputTok int
 }
 
 // NewClaudeProvider creates a ClaudeProvider from the ANTHROPIC_API_KEY environment variable.
@@ -37,13 +40,15 @@ func NewClaudeProvider() (*ClaudeProvider, error) {
 	if key == "" {
 		return nil, fmt.Errorf("ANTHROPIC_API_KEY not set")
 	}
-	return &ClaudeProvider{apiKey: key, model: "claude-sonnet-4-6"}, nil
+	return &ClaudeProvider{apiKey: key, model: "claude-sonnet-4-6", maxToolCalls: provider.DefaultMaxToolCalls}, nil
 }
 
-func (p *ClaudeProvider) Name() string        { return "claude" }
-func (p *ClaudeProvider) ActiveModel() string { return p.model }
-func (p *ClaudeProvider) Models() []string    { return claudeModels }
-func (p *ClaudeProvider) ContextWindow() int  { return 200000 }
+func (p *ClaudeProvider) Name() string                    { return "claude" }
+func (p *ClaudeProvider) ActiveModel() string             { return p.model }
+func (p *ClaudeProvider) Models() []string                { return claudeModels }
+func (p *ClaudeProvider) ContextWindow() int              { return 200000 }
+func (p *ClaudeProvider) Usage() (int, int)               { return p.lastInputTok, p.lastOutputTok }
+func (p *ClaudeProvider) SetMaxToolCalls(n int)           { p.maxToolCalls = n }
 
 func (p *ClaudeProvider) SetModel(model string) error {
 	for _, m := range claudeModels {
@@ -101,6 +106,15 @@ type cSSEData struct {
 		PartialJSON string `json:"partial_json"`
 		StopReason  string `json:"stop_reason"`
 	} `json:"delta,omitempty"`
+	// usage fields — present on message_start (input) and message_delta (output)
+	Message *struct {
+		Usage *struct {
+			InputTokens int `json:"input_tokens"`
+		} `json:"usage,omitempty"`
+	} `json:"message,omitempty"`
+	Usage *struct {
+		OutputTokens int `json:"output_tokens"`
+	} `json:"usage,omitempty"`
 }
 
 func (p *ClaudeProvider) Chat(ctx context.Context, systemPrompt string, messages []provider.Message, providerTools []provider.Tool, onToken func(string), onTool func(name, input, result string), onHistory func(role, content string)) error {
@@ -120,6 +134,10 @@ func (p *ClaudeProvider) Chat(ctx context.Context, systemPrompt string, messages
 		inputBuf strings.Builder
 	}
 
+	p.lastInputTok = 0
+	p.lastOutputTok = 0
+	callCount := 0
+
 	for {
 		req := cRequest{
 			Model:     p.model,
@@ -135,6 +153,10 @@ func (p *ClaudeProvider) Chat(ctx context.Context, systemPrompt string, messages
 
 		if err := p.stream(ctx, req, func(ev cSSEData) {
 			switch ev.Type {
+			case "message_start":
+				if ev.Message != nil && ev.Message.Usage != nil {
+					p.lastInputTok = ev.Message.Usage.InputTokens
+				}
 			case "content_block_start":
 				if ev.ContentBlock != nil {
 					blocks[ev.Index] = &blockState{
@@ -157,6 +179,9 @@ func (p *ClaudeProvider) Chat(ctx context.Context, systemPrompt string, messages
 			case "message_delta":
 				if ev.Delta != nil {
 					stopReason = ev.Delta.StopReason
+				}
+				if ev.Usage != nil {
+					p.lastOutputTok = ev.Usage.OutputTokens
 				}
 			}
 		}); err != nil {
@@ -187,6 +212,12 @@ func (p *ClaudeProvider) Chat(ctx context.Context, systemPrompt string, messages
 				Name:  b.name,
 				Input: inputRaw,
 			})
+		}
+
+		// enforce tool-call loop guard
+		callCount += len(assistantBlocks)
+		if callCount > p.maxToolCalls {
+			return fmt.Errorf("tool call limit reached (%d) — model may be looping; use /compact to reduce context", p.maxToolCalls)
 		}
 
 		// persist the assistant turn (tool_use blocks) for multi-turn history

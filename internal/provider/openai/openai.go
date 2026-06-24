@@ -26,9 +26,12 @@ var openaiModels = []string{
 
 // OpenAIProvider implements provider.Provider using the OpenAI API.
 type OpenAIProvider struct {
-	client oai.Client
-	model  string
-	name   string
+	client        oai.Client
+	model         string
+	name          string
+	maxToolCalls  int
+	lastInputTok  int
+	lastOutputTok int
 }
 
 // NewOpenAIProvider creates an OpenAIProvider from the OPENAI_API_KEY environment variable.
@@ -38,9 +41,10 @@ func NewOpenAIProvider() (*OpenAIProvider, error) {
 		return nil, fmt.Errorf("OPENAI_API_KEY not set")
 	}
 	return &OpenAIProvider{
-		client: oai.NewClient(option.WithAPIKey(key)),
-		model:  "gpt-4.1",
-		name:   "openai",
+		client:       oai.NewClient(option.WithAPIKey(key)),
+		model:        "gpt-4.1",
+		name:         "openai",
+		maxToolCalls: provider.DefaultMaxToolCalls,
 	}, nil
 }
 
@@ -59,6 +63,9 @@ func (p *OpenAIProvider) ContextWindow() int {
 	}
 }
 
+func (p *OpenAIProvider) Usage() (int, int)     { return p.lastInputTok, p.lastOutputTok }
+func (p *OpenAIProvider) SetMaxToolCalls(n int) { p.maxToolCalls = n }
+
 func (p *OpenAIProvider) SetModel(model string) error {
 	for _, m := range openaiModels {
 		if m == model {
@@ -70,14 +77,17 @@ func (p *OpenAIProvider) SetModel(model string) error {
 }
 
 func (p *OpenAIProvider) Chat(ctx context.Context, systemPrompt string, messages []provider.Message, providerTools []provider.Tool, onToken func(string), onTool func(name, input, result string), onHistory func(role, content string)) error {
-	return openaiChat(ctx, &p.client, p.model, systemPrompt, messages, providerTools, onToken, onTool, onHistory, false)
+	return openaiChat(ctx, &p.client, p.model, systemPrompt, messages, providerTools, p.maxToolCalls, &p.lastInputTok, &p.lastOutputTok, onToken, onTool, onHistory, false)
 }
 
 // OllamaProvider reuses the OpenAI-compatible Ollama endpoint.
 type OllamaProvider struct {
-	client oai.Client
-	model  string
-	models []string
+	client        oai.Client
+	model         string
+	models        []string
+	maxToolCalls  int
+	lastInputTok  int
+	lastOutputTok int
 }
 
 // NewOllamaProvider creates an OllamaProvider connecting to the local Ollama server.
@@ -93,6 +103,7 @@ func NewOllamaProvider() (*OllamaProvider, error) {
 			option.WithBaseURL(baseURL),
 			option.WithAPIKey("ollama"),
 		),
+		maxToolCalls: provider.DefaultMaxToolCalls,
 	}
 	models, err := p.fetchModels(baseURL)
 	if err != nil {
@@ -133,6 +144,9 @@ func (p *OllamaProvider) ActiveModel() string { return p.model }
 func (p *OllamaProvider) Models() []string    { return p.models }
 func (p *OllamaProvider) ContextWindow() int  { return 8192 }
 
+func (p *OllamaProvider) Usage() (int, int)     { return p.lastInputTok, p.lastOutputTok }
+func (p *OllamaProvider) SetMaxToolCalls(n int) { p.maxToolCalls = n }
+
 func (p *OllamaProvider) SetModel(model string) error {
 	for _, m := range p.models {
 		if m == model {
@@ -146,13 +160,15 @@ func (p *OllamaProvider) SetModel(model string) error {
 func (p *OllamaProvider) Chat(ctx context.Context, systemPrompt string, messages []provider.Message, providerTools []provider.Tool, onToken func(string), onTool func(name, input, result string), onHistory func(role, content string)) error {
 	// Ollama models handle tool results better as plain user messages than as
 	// structured tool_result blocks (many local models ignore the latter).
-	return openaiChat(ctx, &p.client, p.model, systemPrompt, messages, providerTools, onToken, onTool, onHistory, true)
+	return openaiChat(ctx, &p.client, p.model, systemPrompt, messages, providerTools, p.maxToolCalls, &p.lastInputTok, &p.lastOutputTok, onToken, onTool, onHistory, true)
 }
 
 // openaiChat is the shared tool-calling loop for OpenAI and Ollama.
 // textToolResults=true sends tool results as plain UserMessages instead of
 // structured ToolMessages — required for Ollama models that ignore the latter.
-func openaiChat(ctx context.Context, client *oai.Client, model, systemPrompt string, messages []provider.Message, providerTools []provider.Tool, onToken func(string), onTool func(name, input, result string), onHistory func(role, content string), textToolResults bool) error {
+// inTok/outTok are updated with the token counts from each API call (the last
+// call's values represent the full-context size and output respectively).
+func openaiChat(ctx context.Context, client *oai.Client, model, systemPrompt string, messages []provider.Message, providerTools []provider.Tool, maxToolCalls int, inTok, outTok *int, onToken func(string), onTool func(name, input, result string), onHistory func(role, content string), textToolResults bool) error {
 	msgs := toOpenAIMessages(messages)
 	if systemPrompt != "" {
 		msgs = append([]oai.ChatCompletionMessageParamUnion{oai.SystemMessage(systemPrompt)}, msgs...)
@@ -163,6 +179,7 @@ func openaiChat(ctx context.Context, client *oai.Client, model, systemPrompt str
 		oaiTools = toOpenAITools(providerTools)
 	}
 
+	callCount := 0
 	for {
 		params := oai.ChatCompletionNewParams{
 			Model:    model,
@@ -187,6 +204,14 @@ func openaiChat(ctx context.Context, client *oai.Client, model, systemPrompt str
 				return err
 			}
 		}
+		// Capture token usage; updated on every iteration so the last write
+		// reflects the largest context (input) and cumulative output.
+		if inTok != nil {
+			*inTok = int(resp.Usage.PromptTokens)
+		}
+		if outTok != nil {
+			*outTok += int(resp.Usage.CompletionTokens)
+		}
 		if len(resp.Choices) == 0 {
 			return nil
 		}
@@ -210,6 +235,10 @@ func openaiChat(ctx context.Context, client *oai.Client, model, systemPrompt str
 					onHistory(provider.RoleHistUsr, resultText)
 					msgs = append(msgs, oai.AssistantMessage(content))
 					msgs = append(msgs, oai.UserMessage(resultText))
+					callCount++
+					if callCount > maxToolCalls {
+						return fmt.Errorf("tool call limit reached (%d) — model may be looping; use /compact to reduce context", maxToolCalls)
+					}
 					continue
 				}
 			}
@@ -257,6 +286,10 @@ func openaiChat(ctx context.Context, client *oai.Client, model, systemPrompt str
 				onHistory(provider.RoleHistUsrOAI, string(resJSON))
 				msgs = append(msgs, oai.ToolMessage(result, tc.ID))
 			}
+		}
+		callCount += len(choice.Message.ToolCalls)
+		if callCount > maxToolCalls {
+			return fmt.Errorf("tool call limit reached (%d) — model may be looping; use /compact to reduce context", maxToolCalls)
 		}
 	}
 }

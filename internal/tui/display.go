@@ -69,16 +69,8 @@ func (t *TUI) renderLocked() {
 	if t.systemPrompt != "" {
 		sysIndicator = "  [sys]"
 	}
-	ctxTokens := t.estimatedTokens()
-	ctxWin := t.contextWindow()
-	var ctxLabel string
-	if ctxWin > 0 {
-		ctxLabel = fmt.Sprintf("~%dk/%dk", ctxTokens/1000, ctxWin/1000)
-	} else {
-		ctxLabel = fmt.Sprintf("~%dk", ctxTokens/1000)
-	}
 	left := fmt.Sprintf(" kiln │  %s  │  permissions: %s%s  ", t.model, permLabel, sysIndicator)
-	right := fmt.Sprintf("  ctx: %s  Ctrl+C to exit ", ctxLabel)
+	right := "  Ctrl+C to exit "
 	pad := t.width - len(left) - len(right)
 	if pad < 0 {
 		pad = 0
@@ -118,9 +110,15 @@ func (t *TUI) renderLocked() {
 		}
 	}
 
-	// Bottom divider
+	// Bottom divider — replaced with confirmation prompt when a tool needs approval.
 	sb.WriteString(moveTo(t.height-1, 1))
-	sb.WriteString(ansiDim + strings.Repeat("─", t.width) + ansiReset)
+	sb.WriteString(ansiClearLine)
+	if t.pendingConfirm != nil {
+		label := truncate(t.pendingConfirm.label, t.width-14)
+		sb.WriteString(ansiCyan + ansiBold + "  proceed: " + ansiReset + label + ansiDim + "  [y/N]" + ansiReset)
+	} else {
+		sb.WriteString(ansiDim + strings.Repeat("─", t.width) + ansiReset)
+	}
 
 	// Input line — render block cursor at t.cursorPos
 	sb.WriteString(moveTo(t.height, 1))

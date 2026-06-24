@@ -12,6 +12,7 @@ import (
 
 	"kiln/internal/permissions"
 	"kiln/internal/provider"
+	"kiln/internal/session"
 )
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -44,17 +45,32 @@ type TUI struct {
 
 	width        int
 	height       int
-	scrollOffset int
-	quit         bool
-	responding   bool
-	chatCancel   func() // non-nil while a Chat() call is in flight
-	lastTitle    string // last title sent to the terminal; avoids redundant escapes
+	scrollOffset  int
+	quit          bool
+	responding    bool
+	chatCancel    func() // non-nil while a Chat() call is in flight
+	lastTitle     string // last title sent to the terminal; avoids redundant escapes
+	contextTokens int    // actual input-token count from last provider call (0 = use estimate)
 
-	activeProvider  provider.Provider
-	providers       map[string]provider.Provider
-	permStore       *permissions.PermStore
+	// runtime configuration (set via Configure before Run)
+	chatTimeout     time.Duration
+	autoSaveSession bool
+	confirmWrites   bool
+
+	// write-confirmation handshake (set by runChat goroutine, cleared after reply)
+	pendingConfirm *confirmReq
+
+	activeProvider provider.Provider
+	providers      map[string]provider.Provider
+	permStore      *permissions.PermStore
 
 	origTermios syscall.Termios
+}
+
+// confirmReq is a pending confirmation request from the tool-execution path.
+type confirmReq struct {
+	label   string    // short description shown to the user
+	replyCh chan bool  // buffered(1); caller sends true=proceed false=skip
 }
 
 type winsize struct {
@@ -69,12 +85,14 @@ type winsize struct {
 func NewTUI() *TUI {
 	cwd, _ := os.Getwd()
 	t := &TUI{
-		model:         "none",
-		repo:          filepath.Base(cwd),
-		repoPath:      cwd,
-		providers:     make(map[string]provider.Provider),
-		historyIdx:    -1,
-		completionIdx: -1,
+		model:           "none",
+		repo:            filepath.Base(cwd),
+		repoPath:        cwd,
+		providers:       make(map[string]provider.Provider),
+		historyIdx:      -1,
+		completionIdx:   -1,
+		chatTimeout:     5 * time.Minute,
+		autoSaveSession: true,
 	}
 	if ps, err := permissions.LoadPermStore(); err == nil {
 		t.permStore = ps
@@ -103,6 +121,49 @@ func (t *TUI) AddProvider(p provider.Provider) {
 				}
 			}
 			break
+		}
+	}
+}
+
+// Options holds user-configurable TUI settings, typically loaded from config.
+type Options struct {
+	MaxToolCalls    int
+	ChatTimeout     time.Duration
+	ConfirmWrites   bool
+	AutoSaveSession bool // default true in NewTUI; explicit false disables
+	SystemPrompt    string
+	DefaultModel    string
+}
+
+// Configure applies user config to the TUI and all registered providers.
+// Must be called after AddProvider so providers can receive SetMaxToolCalls.
+func (t *TUI) Configure(opts Options) {
+	if opts.MaxToolCalls > 0 {
+		for _, p := range t.providers {
+			p.SetMaxToolCalls(opts.MaxToolCalls)
+		}
+	}
+	if opts.ChatTimeout > 0 {
+		t.chatTimeout = opts.ChatTimeout
+	}
+	t.confirmWrites = opts.ConfirmWrites
+	// AutoSaveSession is true by default; only override when explicitly set to false.
+	if !opts.AutoSaveSession {
+		t.autoSaveSession = false
+	}
+	if opts.SystemPrompt != "" {
+		t.systemPrompt = opts.SystemPrompt
+	}
+	if opts.DefaultModel != "" {
+		parts := strings.SplitN(opts.DefaultModel, "/", 2)
+		if len(parts) == 2 {
+			pname, mname := parts[0], parts[1]
+			if p, ok := t.providers[pname]; ok {
+				if p.SetModel(mname) == nil {
+					t.activeProvider = p
+					t.model = opts.DefaultModel
+				}
+			}
 		}
 	}
 }
@@ -179,9 +240,33 @@ func (t *TUI) Run() error {
 	go watchResize(sigCh, t)
 	defer close(sigCh)
 
+	// Restore saved session before showing welcome message.
+	sessionRestored := false
+	if t.autoSaveSession {
+		if sess, err := session.Load(t.repoPath); err == nil && len(sess.Messages) > 0 {
+			t.messages = sess.ToProviderMessages()
+			if sess.SystemPrompt != "" && t.systemPrompt == "" {
+				t.systemPrompt = sess.SystemPrompt
+			}
+			if sess.Model != "" {
+				parts := strings.SplitN(sess.Model, "/", 2)
+				if len(parts) == 2 {
+					if p, ok := t.providers[parts[0]]; ok {
+						if p.SetModel(parts[1]) == nil {
+							t.activeProvider = p
+							t.model = sess.Model
+						}
+					}
+				}
+			}
+			t.addSystem("session restored — /sessions clear to start fresh")
+			sessionRestored = true
+		}
+	}
+
 	if t.activeProvider == nil {
 		t.addSystem("no provider connected\nset ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, or start Ollama")
-	} else {
+	} else if !sessionRestored {
 		connected := make([]string, 0, len(t.providers))
 		for _, name := range []string{"claude", "openai", "gemini", "ollama"} {
 			if _, ok := t.providers[name]; ok {
@@ -219,7 +304,7 @@ func (t *TUI) Run() error {
 		shouldStart := t.responding && t.chatCancel == nil
 		t.mu.Unlock()
 		if shouldStart {
-			ctx, cancel := newChatContext()
+			ctx, cancel := t.newChatContext()
 			t.mu.Lock()
 			t.chatCancel = cancel
 			t.mu.Unlock()
@@ -239,9 +324,13 @@ func (t *TUI) addSystem(msg string) {
 	t.messages = append(t.messages, provider.Message{Role: "system", Content: msg})
 }
 
-// estimatedTokens returns a rough token count for the current conversation.
+// tokenCount returns the best available context-size estimate in tokens.
+// When the provider has reported real usage, that takes priority over chars/4.
 // Safe to call from renderLocked (t.mu already held) — must not re-acquire t.mu.
-func (t *TUI) estimatedTokens() int {
+func (t *TUI) tokenCount() int {
+	if t.contextTokens > 0 {
+		return t.contextTokens
+	}
 	chars := len(systemPrompt) + 300 // base prompt + session-context injection
 	for _, m := range t.messages {
 		switch m.Role {

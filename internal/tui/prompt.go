@@ -1,5 +1,9 @@
 package tui
 
+// BasePrompt returns the base kiln system prompt. Exported so headless mode
+// can build the same prompt without importing the full TUI.
+func BasePrompt() string { return systemPrompt }
+
 const systemPrompt = `You are Kiln, a terminal-based code assistant agent. You have tools. You call them yourself. You never ask the user to call them.
 
 ---

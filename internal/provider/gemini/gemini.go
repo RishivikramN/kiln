@@ -24,8 +24,11 @@ var geminiModels = []string{
 
 // GeminiProvider implements provider.Provider using the Google Gemini REST API.
 type GeminiProvider struct {
-	apiKey string
-	model  string
+	apiKey        string
+	model         string
+	maxToolCalls  int
+	lastInputTok  int
+	lastOutputTok int
 }
 
 // NewGeminiProvider creates a GeminiProvider from the GEMINI_API_KEY or GOOGLE_API_KEY environment variable.
@@ -37,13 +40,16 @@ func NewGeminiProvider() (*GeminiProvider, error) {
 	if key == "" {
 		return nil, fmt.Errorf("GEMINI_API_KEY not set")
 	}
-	return &GeminiProvider{apiKey: key, model: "gemini-2.5-flash"}, nil
+	return &GeminiProvider{apiKey: key, model: "gemini-2.5-flash", maxToolCalls: provider.DefaultMaxToolCalls}, nil
 }
 
 func (p *GeminiProvider) Name() string        { return "gemini" }
 func (p *GeminiProvider) ActiveModel() string { return p.model }
 func (p *GeminiProvider) Models() []string    { return geminiModels }
 func (p *GeminiProvider) ContextWindow() int  { return 1000000 }
+
+func (p *GeminiProvider) Usage() (int, int)     { return p.lastInputTok, p.lastOutputTok }
+func (p *GeminiProvider) SetMaxToolCalls(n int) { p.maxToolCalls = n }
 
 func (p *GeminiProvider) SetModel(model string) error {
 	for _, m := range geminiModels {
@@ -108,6 +114,10 @@ type gResponse struct {
 			Role  string  `json:"role"`
 		} `json:"content"`
 	} `json:"candidates"`
+	UsageMetadata *struct {
+		PromptTokenCount     int `json:"promptTokenCount"`
+		CandidatesTokenCount int `json:"candidatesTokenCount"`
+	} `json:"usageMetadata,omitempty"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
@@ -121,6 +131,10 @@ func (p *GeminiProvider) Chat(ctx context.Context, systemPrompt string, messages
 	if len(providerTools) > 0 {
 		req.Tools = []gTool{{FunctionDeclarations: toGDecls(providerTools)}}
 	}
+
+	p.lastInputTok = 0
+	p.lastOutputTok = 0
+	callCount := 0
 
 	for {
 		var textParts []string
@@ -138,12 +152,21 @@ func (p *GeminiProvider) Chat(ctx context.Context, systemPrompt string, messages
 					}
 				}
 			}
+			if resp.UsageMetadata != nil {
+				p.lastInputTok = resp.UsageMetadata.PromptTokenCount
+				p.lastOutputTok += resp.UsageMetadata.CandidatesTokenCount
+			}
 		}); err != nil {
 			return err
 		}
 
 		if len(calls) == 0 {
 			return nil
+		}
+
+		callCount += len(calls)
+		if callCount > p.maxToolCalls {
+			return fmt.Errorf("tool call limit reached (%d) — model may be looping; use /compact to reduce context", p.maxToolCalls)
 		}
 
 		// append model turn (text + function calls)

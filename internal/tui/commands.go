@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"kiln/internal/permissions"
+	"kiln/internal/session"
 )
 
 func (t *TUI) handleCommand(cmd string) {
@@ -45,6 +46,8 @@ func (t *TUI) handleCommand(cmd string) {
 		t.handlePermissions(parts[1:])
 	case "/system":
 		t.handleSystem(parts[1:])
+	case "/sessions":
+		t.handleSessions(parts[1:])
 	case "/compact":
 		t.handleCompact()
 		return // handleCompact launches a goroutine; don't reset scrollOffset yet
@@ -182,6 +185,22 @@ func (t *TUI) handleUndo() {
 	}
 }
 
+func (t *TUI) handleSessions(args []string) {
+	if len(args) > 0 && args[0] == "clear" {
+		if err := session.Delete(t.repoPath); err != nil {
+			t.addSystem("sessions: " + err.Error())
+		} else {
+			t.addSystem("session cleared")
+		}
+		return
+	}
+	if session.Exists(t.repoPath) {
+		t.addSystem(fmt.Sprintf("session saved for %s\nuse /sessions clear to delete", t.repo))
+	} else {
+		t.addSystem("no session saved for this repo")
+	}
+}
+
 func (t *TUI) handleCompact() {
 	if t.activeProvider == nil {
 		t.addSystem("no provider connected")
@@ -193,7 +212,7 @@ func (t *TUI) handleCompact() {
 		t.addSystem("wait for current response to finish before compacting")
 		return
 	}
-	ctx, cancel := newChatContext()
+	ctx, cancel := t.newChatContext()
 	t.chatCancel = cancel
 	t.mu.Unlock()
 

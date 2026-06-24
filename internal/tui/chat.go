@@ -11,6 +11,7 @@ import (
 	"kiln/internal/diff"
 	"kiln/internal/permissions"
 	"kiln/internal/provider"
+	"kiln/internal/session"
 	"kiln/internal/tools"
 )
 
@@ -64,8 +65,14 @@ func (t *TUI) runChat(ctx context.Context) {
 			base = tools.ReadTools() // list_files + read_file only
 		}
 		for i := range base {
+			toolName := base[i].Name
 			orig := base[i].Execute
 			base[i].Execute = func(_ string, _ *permissions.PermStore, input map[string]any) (string, error) {
+				if t.confirmWrites && isDestructiveTool(toolName) {
+					if !t.awaitConfirm(describeToolCall(toolName, input)) {
+						return "skipped — user declined", nil
+					}
+				}
 				return orig(rp, ps, input)
 			}
 		}
@@ -172,7 +179,60 @@ func (t *TUI) runChat(ctx context.Context) {
 		t.messages[idx].Content = "error: " + err.Error()
 		t.mu.Unlock()
 		t.render()
+		return
 	}
+
+	// Capture actual token usage from the provider (if available) for the status bar.
+	if in, _ := t.activeProvider.Usage(); in > 0 {
+		t.mu.Lock()
+		t.contextTokens = in
+		t.mu.Unlock()
+	}
+
+	// Auto-save session after each successful turn.
+	if t.autoSaveSession {
+		t.mu.Lock()
+		msgs := make([]provider.Message, len(t.messages))
+		copy(msgs, t.messages)
+		model, sysp, repo := t.model, t.systemPrompt, t.repoPath
+		t.mu.Unlock()
+		session.Save(repo, model, sysp, msgs) // ignore error — non-critical
+	}
+}
+
+// awaitConfirm blocks the calling goroutine (runChat) until the user presses
+// y/Y (returns true) or any other key (returns false). The TUI renders a
+// confirmation prompt in place of the bottom divider while waiting.
+func (t *TUI) awaitConfirm(label string) bool {
+	req := &confirmReq{label: label, replyCh: make(chan bool, 1)}
+	t.mu.Lock()
+	t.pendingConfirm = req
+	t.mu.Unlock()
+	t.render()
+	result := <-req.replyCh
+	t.mu.Lock()
+	t.pendingConfirm = nil
+	t.mu.Unlock()
+	t.render()
+	return result
+}
+
+func isDestructiveTool(name string) bool {
+	return name == "write_file" || name == "run_command"
+}
+
+func describeToolCall(name string, input map[string]any) string {
+	switch name {
+	case "write_file":
+		if p, ok := input["path"].(string); ok {
+			return "write " + p
+		}
+	case "run_command":
+		if cmd, ok := input["command"].(string); ok {
+			return "run: " + cmd
+		}
+	}
+	return name
 }
 
 // pruneOldToolResults replaces the content of tool-result messages that are

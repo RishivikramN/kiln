@@ -19,7 +19,11 @@ func watchResize(sigCh chan os.Signal, t *TUI) {
 	signal.Stop(sigCh)
 }
 
-// newChatContext creates a context with a 5-minute timeout for a single chat turn.
-func newChatContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), 5*time.Minute)
+// newChatContext creates a context with the configured timeout for one chat turn.
+func (t *TUI) newChatContext() (context.Context, context.CancelFunc) {
+	timeout := t.chatTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Minute
+	}
+	return context.WithTimeout(context.Background(), timeout)
 }

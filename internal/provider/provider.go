@@ -7,6 +7,11 @@ import (
 	"kiln/internal/permissions"
 )
 
+// DefaultMaxToolCalls is the out-of-the-box cap on tool-call iterations per
+// Chat turn. Providers use this as their initial value; callers may override
+// it via SetMaxToolCalls.
+const DefaultMaxToolCalls = 50
+
 // History role constants used across all providers and the TUI.
 const (
 	RoleHistAst       = "hist_ast"
@@ -44,6 +49,12 @@ type Provider interface {
 	// ContextWindow returns the maximum context length in tokens for the active
 	// model. Returns 0 if unknown.
 	ContextWindow() int
+	// Usage returns the actual input and output token counts from the last
+	// Chat() call, as reported by the provider. Both are 0 before the first call.
+	Usage() (inputTokens, outputTokens int)
+	// SetMaxToolCalls sets the maximum number of tool calls allowed per Chat
+	// turn. The provider returns an error if the limit is exceeded.
+	SetMaxToolCalls(n int)
 	// Chat runs a conversation turn. tools may be nil. The provider owns the
 	// tool-calling loop: it keeps calling the model until no more tool calls
 	// are requested, executes each tool via onTool, and streams text via onToken.
