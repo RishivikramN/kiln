@@ -10,6 +10,7 @@ import (
 	"time"
 	"unsafe"
 
+	"kiln/internal/diff"
 	"kiln/internal/permissions"
 	"kiln/internal/provider"
 	"kiln/internal/session"
@@ -60,6 +61,11 @@ type TUI struct {
 	// write-confirmation handshake (set by runChat goroutine, cleared after reply)
 	pendingConfirm *confirmReq
 
+	// inputCarryover holds the unprocessed tail of the last Read() call when a
+	// mouse escape sequence was split across reads. Only touched by the main
+	// event goroutine — no mutex needed.
+	inputCarryover []byte
+
 	activeProvider provider.Provider
 	providers      map[string]provider.Provider
 	permStore      *permissions.PermStore
@@ -69,8 +75,9 @@ type TUI struct {
 
 // confirmReq is a pending confirmation request from the tool-execution path.
 type confirmReq struct {
-	label   string    // short description shown to the user
-	replyCh chan bool  // buffered(1); caller sends true=proceed false=skip
+	label   string       // short description shown to the user
+	diff    *diff.Result // optional: preview diff to display above the prompt
+	replyCh chan bool     // buffered(1); caller sends true=proceed false=skip
 }
 
 type winsize struct {
@@ -231,9 +238,11 @@ func (t *TUI) Run() error {
 		return fmt.Errorf("failed to enable raw mode: %w", err)
 	}
 	defer t.disableRawMode()
-	defer fmt.Print(ansiShowCursor)
-	defer fmt.Print(ansiClearScreen)
-	defer fmt.Print("\033]0;\007") // restore blank tab title on exit
+	fmt.Print("\033[?1049h")           // enter alternate screen
+	fmt.Print("\033[?1000h\033[?1006h") // enable mouse reporting (SGR extended)
+	defer fmt.Print("\033[?1006l\033[?1000l") // disable mouse reporting
+	defer fmt.Print("\033[?1049l\033[?25h")   // exit alternate screen + show cursor
+	defer fmt.Print("\033]0;\007")             // restore blank tab title on exit
 
 	sigCh := make(chan os.Signal, 1)
 	// Use os/signal indirectly — import via syscall.SIGWINCH
@@ -289,13 +298,23 @@ func (t *TUI) Run() error {
 	}
 	t.render()
 
-	buf := make([]byte, 32)
+	buf := make([]byte, 512)
 	for {
 		n, err := os.Stdin.Read(buf)
 		if err != nil {
 			return nil
 		}
-		if !t.handleKey(buf[:n]) {
+		// Prepend any bytes saved from the previous read (partial escape sequence).
+		var data []byte
+		if len(t.inputCarryover) > 0 {
+			data = make([]byte, len(t.inputCarryover)+n)
+			copy(data, t.inputCarryover)
+			copy(data[len(t.inputCarryover):], buf[:n])
+			t.inputCarryover = t.inputCarryover[:0]
+		} else {
+			data = buf[:n]
+		}
+		if !t.handleKey(data) {
 			return nil
 		}
 		t.render()

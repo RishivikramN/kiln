@@ -20,6 +20,9 @@ func TestLoad_missingFile(t *testing.T) {
 	if cfg.ChatTimeoutSecs != 300 {
 		t.Errorf("want ChatTimeoutSecs=300, got %d", cfg.ChatTimeoutSecs)
 	}
+	if !cfg.ConfirmWrites {
+		t.Error("want ConfirmWrites=true by default")
+	}
 	if !cfg.AutoSaveSession {
 		t.Error("want AutoSaveSession=true by default")
 	}

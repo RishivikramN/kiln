@@ -110,12 +110,40 @@ func (t *TUI) renderLocked() {
 		}
 	}
 
+	// Diff overlay — shown above the confirm prompt when a write_file is pending.
+	if t.pendingConfirm != nil && t.pendingConfirm.diff != nil {
+		diffLines := render.RenderDiff(*t.pendingConfirm.diff, t.width)
+		// reserve up to half the chat area; always leave at least one row for context
+		maxShow := chatHeight / 2
+		if maxShow < 4 {
+			maxShow = 4
+		}
+		if len(diffLines) < maxShow {
+			maxShow = len(diffLines)
+		}
+		// header row sits just above the diff block
+		headerRow := t.height - 1 - maxShow - 1
+		if headerRow >= 3 {
+			sb.WriteString(moveTo(headerRow, 1))
+			sb.WriteString(ansiClearLine)
+			hdr := "  diff preview " + strings.Repeat("─", t.width-16)
+			sb.WriteString(ansiDim + hdr + ansiReset)
+		}
+		diffStart := t.height - 1 - maxShow
+		shown := diffLines[len(diffLines)-maxShow:]
+		for i, l := range shown {
+			sb.WriteString(moveTo(diffStart+i, 1))
+			sb.WriteString(ansiClearLine)
+			sb.WriteString(l)
+		}
+	}
+
 	// Bottom divider — replaced with confirmation prompt when a tool needs approval.
 	sb.WriteString(moveTo(t.height-1, 1))
 	sb.WriteString(ansiClearLine)
 	if t.pendingConfirm != nil {
 		label := truncate(t.pendingConfirm.label, t.width-14)
-		sb.WriteString(ansiCyan + ansiBold + "  proceed: " + ansiReset + label + ansiDim + "  [y/N]" + ansiReset)
+		sb.WriteString(ansiCyan + ansiBold + "  proceed? " + ansiReset + label + ansiDim + "  [y/N]" + ansiReset)
 	} else {
 		sb.WriteString(ansiDim + strings.Repeat("─", t.width) + ansiReset)
 	}

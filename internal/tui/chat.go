@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -69,7 +70,11 @@ func (t *TUI) runChat(ctx context.Context) {
 			orig := base[i].Execute
 			base[i].Execute = func(_ string, _ *permissions.PermStore, input map[string]any) (string, error) {
 				if t.confirmWrites && isDestructiveTool(toolName) {
-					if !t.awaitConfirm(describeToolCall(toolName, input)) {
+					var previewDiff *diff.Result
+					if toolName == "write_file" {
+						previewDiff = computePreviewDiff(rp, input)
+					}
+					if !t.awaitConfirm(describeToolCall(toolName, input), previewDiff) {
 						return "skipped — user declined", nil
 					}
 				}
@@ -201,10 +206,11 @@ func (t *TUI) runChat(ctx context.Context) {
 }
 
 // awaitConfirm blocks the calling goroutine (runChat) until the user presses
-// y/Y (returns true) or any other key (returns false). The TUI renders a
-// confirmation prompt in place of the bottom divider while waiting.
-func (t *TUI) awaitConfirm(label string) bool {
-	req := &confirmReq{label: label, replyCh: make(chan bool, 1)}
+// y/Y (returns true) or any other key (returns false). When d is non-nil the
+// diff is overlaid in the chat area above the prompt so the user can see what
+// will change before deciding.
+func (t *TUI) awaitConfirm(label string, d *diff.Result) bool {
+	req := &confirmReq{label: label, diff: d, replyCh: make(chan bool, 1)}
 	t.mu.Lock()
 	t.pendingConfirm = req
 	t.mu.Unlock()
@@ -215,6 +221,21 @@ func (t *TUI) awaitConfirm(label string) bool {
 	t.mu.Unlock()
 	t.render()
 	return result
+}
+
+// computePreviewDiff reads the current file on disk and computes a diff
+// against the content the model is about to write, without performing the write.
+// Returns nil when the path or content is missing or the file cannot be read.
+func computePreviewDiff(repoPath string, input map[string]any) *diff.Result {
+	rel, _ := input["path"].(string)
+	newContent, _ := input["content"].(string)
+	if rel == "" {
+		return nil
+	}
+	target := repoPath + "/" + rel
+	oldBytes, _ := os.ReadFile(target) // empty for new files
+	d := diff.Compute(string(oldBytes), newContent, rel)
+	return &d
 }
 
 func isDestructiveTool(name string) bool {

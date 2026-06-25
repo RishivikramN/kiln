@@ -47,6 +47,61 @@ func (t *TUI) handleKey(b []byte) bool {
 		return true
 	}
 
+	// SGR mouse event: ESC [ < Pb ; Px ; Py M/m
+	// Button 64 = scroll up, 65 = scroll down. Other buttons (clicks) ignored.
+	if len(b) >= 3 && b[0] == 27 && b[1] == '[' && b[2] == '<' {
+		// Find the terminating M or m so we know the full event boundary.
+		end := -1
+		for i := 3; i < len(b); i++ {
+			if b[i] == 'M' || b[i] == 'm' {
+				end = i
+				break
+			}
+		}
+		if end == -1 {
+			// Incomplete event: the read was split mid-sequence.
+			// Save and wait for the rest to arrive in the next read.
+			t.inputCarryover = append(t.inputCarryover[:0], b...)
+			return true
+		}
+		// Complete event — act on it.
+		btn := parseSGRButton(b[3:])
+		switch btn {
+		case 64: // scroll up
+			t.scrollOffset++
+		case 65: // scroll down
+			if t.scrollOffset > 0 {
+				t.scrollOffset--
+			}
+		}
+		// Process any additional events that arrived in the same read.
+		if end+1 < len(b) {
+			return t.handleKey(b[end+1:])
+		}
+		return true
+	}
+
+	// X10 mouse event: ESC [ M <btn+32> <col+32> <row+32> (always 6 bytes).
+	if len(b) >= 3 && b[0] == 27 && b[1] == '[' && b[2] == 'M' {
+		if len(b) < 6 {
+			t.inputCarryover = append(t.inputCarryover[:0], b...)
+			return true
+		}
+		btn := int(b[3]) - 32
+		switch btn {
+		case 64:
+			t.scrollOffset++
+		case 65:
+			if t.scrollOffset > 0 {
+				t.scrollOffset--
+			}
+		}
+		if len(b) > 6 {
+			return t.handleKey(b[6:])
+		}
+		return true
+	}
+
 	// If a write-confirmation is pending, intercept all keypresses.
 	t.mu.Lock()
 	confirm := t.pendingConfirm
@@ -209,6 +264,9 @@ func (t *TUI) handleKey(b []byte) bool {
 	// printable chars (ASCII + UTF-8) — insert at cursor position
 	if b[0] >= 32 {
 		for _, r := range string(b) {
+			if r < 32 {
+				continue // skip control chars that leaked through (e.g. partial escape sequences)
+			}
 			t.input = append(t.input, 0)
 			copy(t.input[t.cursorPos+1:], t.input[t.cursorPos:])
 			t.input[t.cursorPos] = r
@@ -257,6 +315,21 @@ func (t *TUI) acceptCompletion() {
 	t.cursorPos = len(t.input)
 	t.completions = nil
 	t.completionIdx = -1
+}
+
+// parseSGRButton extracts the button number from an SGR mouse event payload
+// (the bytes after "ESC [ <"). Returns -1 if the format is unrecognised.
+func parseSGRButton(b []byte) int {
+	n := 0
+	for _, c := range b {
+		switch {
+		case c >= '0' && c <= '9':
+			n = n*10 + int(c-'0')
+		case c == ';' || c == 'M' || c == 'm':
+			return n
+		}
+	}
+	return -1
 }
 
 func (t *TUI) cursorWordLeft() {

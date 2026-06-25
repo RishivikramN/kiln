@@ -21,6 +21,7 @@ func defaults() Config {
 	return Config{
 		MaxToolCalls:    50,
 		ChatTimeoutSecs: 300,
+		ConfirmWrites:   true,
 		AutoSaveSession: true,
 	}
 }
